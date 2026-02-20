@@ -7,7 +7,6 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <cmath>
 
@@ -21,8 +20,8 @@ static std::string findOBJ() {
     return {};
 }
 
-static std::string findTexture(const std::string& objDir) {
-    for (auto& e : fs::directory_iterator(objDir)) {
+static std::string findTexture(const fs::path& dir) {
+    for (auto& e : fs::directory_iterator(dir)) {
         auto ext = e.path().extension().string();
         if (ext == ".png" || ext == ".jpg" || ext == ".jpeg")
             return e.path().string();
@@ -50,15 +49,15 @@ int main() {
         return 1;
     }
 
-    for (auto& m : meshes) {
-        renderer.uploadMesh(m);
-        if (!m.texturePath.empty() && fs::exists(m.texturePath))
-            renderer.uploadTexture(m.texturePath);
-    }
+    // Фолбэк: если MTL не задал текстуру — ищем любой PNG/JPG рядом с .obj
+    std::string fallbackTex = findTexture(fs::path(objPath).parent_path());
+    if (!fallbackTex.empty())
+        std::cout << "fallback texture: " << fallbackTex << "\n";
 
-    if (!renderer.meshCount()) {
-        auto tex = findTexture(fs::path(objPath).parent_path().string());
-        if (!tex.empty()) renderer.uploadTexture(tex);
+    for (auto& m : meshes) {
+        if (m.texturePath.empty() && !fallbackTex.empty())
+            m.texturePath = fallbackTex;
+        renderer.uploadMesh(m);
     }
 
     glm::vec3 pos   = {0, 1, 3};
@@ -66,14 +65,38 @@ int main() {
     float     pitch = -10.f;
     Timer     timer;
 
+    // Режим UV анимации: 0 = нет, 1 = скроллинг, 2 = пульсация тайлинга
+    int uvMode = 0;
+
     while (!window.shouldClose()) {
         Input::get().beginFrame();
         window.poll();
         timer.tick();
 
-        float dt = timer.dt();
+        float dt    = timer.dt();
+        float total = timer.total();
 
         if (Input::get().isDown(GLFW_KEY_ESCAPE)) break;
+
+        // Переключение режима UV анимации клавишами 1/2/3
+        if (Input::get().pressed(GLFW_KEY_1)) uvMode = 0;
+        if (Input::get().pressed(GLFW_KEY_2)) uvMode = 1;
+        if (Input::get().pressed(GLFW_KEY_3)) uvMode = 2;
+
+        switch (uvMode) {
+            case 0: // Нет анимации
+                renderer.setUV({0.f, 0.f}, {1.f, 1.f});
+                break;
+            case 1: // Скроллинг
+                renderer.setUV({total * 0.1f, total * 0.05f}, {1.f, 1.f});
+                break;
+            case 2: // Пульсация тайлинга
+                renderer.setUV({0.f, 0.f}, {
+                    1.f + 0.5f * sinf(total),
+                    1.f + 0.5f * sinf(total)
+                });
+                break;
+        }
 
         auto d = Input::get().delta();
         yaw   += d.x * 0.12f;
@@ -93,7 +116,7 @@ int main() {
         if (Input::get().isDown(GLFW_KEY_S)) pos -= dir   * speed;
         if (Input::get().isDown(GLFW_KEY_A)) pos -= right * speed;
         if (Input::get().isDown(GLFW_KEY_D)) pos += right * speed;
-        if (Input::get().isDown(GLFW_KEY_SPACE))      pos.y += speed;
+        if (Input::get().isDown(GLFW_KEY_SPACE))        pos.y += speed;
         if (Input::get().isDown(GLFW_KEY_LEFT_CONTROL)) pos.y -= speed;
 
         renderer.setCamera(pos, pos + dir, {0, 1, 0});
@@ -106,7 +129,8 @@ int main() {
         static float t = 0; t += dt;
         if (t > 0.5f) {
             t = 0;
-            window.setTitle("VulkanApp | " + std::to_string(timer.fps()) + " fps");
+            window.setTitle("VulkanApp | " + std::to_string(timer.fps()) +
+                            " fps | UV mode: " + std::to_string(uvMode + 1));
         }
     }
 }

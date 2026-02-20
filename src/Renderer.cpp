@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <filesystem>
 
 static const std::vector<const char*> kDevExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 static const std::vector<const char*> kLayers  = { "VK_LAYER_KHRONOS_validation" };
@@ -42,7 +43,6 @@ Renderer::Renderer(Window& window) : m_win(window) {
     initWhiteTex();
     initUBOs();
     initDescPool();
-    initDescSets();
     initCmdBuffers();
     initSync();
 
@@ -57,16 +57,13 @@ Renderer::~Renderer() {
     vkDeviceWaitIdle(m_dev);
     destroySwapchain();
 
-    auto destroyTex = [&](VkImageView& v, VkImage& i, VkDeviceMemory& m, VkSampler& s) {
-        if (s) { vkDestroySampler(m_dev, s, nullptr); s = VK_NULL_HANDLE; }
-        if (v) { vkDestroyImageView(m_dev, v, nullptr); v = VK_NULL_HANDLE; }
-        if (i) { vkDestroyImage(m_dev, i, nullptr); i = VK_NULL_HANDLE; }
-        if (m) { vkFreeMemory(m_dev, m, nullptr); m = VK_NULL_HANDLE; }
-    };
-    destroyTex(m_texV, m_texImg, m_texMem, m_texS);
-    destroyTex(m_wV,   m_wImg,   m_wMem,   m_wS);
-
     clearMeshes();
+
+    // Белая текстура
+    if (m_wS)   vkDestroySampler(m_dev, m_wS, nullptr);
+    if (m_wV)   vkDestroyImageView(m_dev, m_wV, nullptr);
+    if (m_wImg) vkDestroyImage(m_dev, m_wImg, nullptr);
+    if (m_wMem) vkFreeMemory(m_dev, m_wMem, nullptr);
 
     for (int i = 0; i < FRAMES; i++) {
         vkDestroyBuffer(m_dev, m_ub[i], nullptr);
@@ -342,16 +339,16 @@ void Renderer::initCmdPool() {
 
 void Renderer::initDescLayout() {
     VkDescriptorSetLayoutBinding ubo{};
-    ubo.binding      = 0;
-    ubo.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ubo.binding         = 0;
+    ubo.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     ubo.descriptorCount = 1;
-    ubo.stageFlags   = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    ubo.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutBinding tex{};
-    tex.binding      = 1;
-    tex.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    tex.binding         = 1;
+    tex.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     tex.descriptorCount = 1;
-    tex.stageFlags   = VK_SHADER_STAGE_FRAGMENT_BIT;
+    tex.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     std::array<VkDescriptorSetLayoutBinding, 2> bindings = {ubo, tex};
     VkDescriptorSetLayoutCreateInfo ci{};
@@ -497,27 +494,17 @@ void Renderer::initUBOs() {
 }
 
 void Renderer::initDescPool() {
+    // Пул на MAX_MESHES мешей * FRAMES кадров
     std::array<VkDescriptorPoolSize, 2> sz = {{
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         FRAMES},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, FRAMES},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         MAX_MESHES * FRAMES},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_MESHES * FRAMES},
     }};
     VkDescriptorPoolCreateInfo ci{};
     ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.poolSizeCount = sz.size();
     ci.pPoolSizes    = sz.data();
-    ci.maxSets       = FRAMES;
+    ci.maxSets       = MAX_MESHES * FRAMES;
     vkCreateDescriptorPool(m_dev, &ci, nullptr, &m_dp);
-}
-
-void Renderer::initDescSets() {
-    std::vector<VkDescriptorSetLayout> layouts(FRAMES, m_dsl);
-    VkDescriptorSetAllocateInfo ai{};
-    ai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    ai.descriptorPool     = m_dp;
-    ai.descriptorSetCount = FRAMES;
-    ai.pSetLayouts        = layouts.data();
-    vkAllocateDescriptorSets(m_dev, &ai, m_ds.data());
-    refreshDescSets();
 }
 
 void Renderer::initCmdBuffers() {
@@ -539,6 +526,140 @@ void Renderer::initSync() {
         vkCreateSemaphore(m_dev, &si, nullptr, &m_renDone[i]);
         vkCreateFence(m_dev, &fi, nullptr, &m_fence[i]);
     }
+}
+
+// Аллоцируем FRAMES дескрипторных сетов из пула для одного меша
+void Renderer::allocMeshDescSets(GpuMesh& gm) {
+    std::vector<VkDescriptorSetLayout> layouts(FRAMES, m_dsl);
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool     = m_dp;
+    ai.descriptorSetCount = FRAMES;
+    ai.pSetLayouts        = layouts.data();
+    vkAllocateDescriptorSets(m_dev, &ai, gm.ds.data());
+}
+
+// Записываем дескрипторы: UBO + текстура (или белая заглушка)
+void Renderer::writeMeshDescSets(GpuMesh& gm) {
+    VkImageView  iv = gm.hasTex ? gm.texView    : m_wV;
+    VkSampler    is = gm.hasTex ? gm.texSampler : m_wS;
+
+    for (int i = 0; i < FRAMES; i++) {
+        VkDescriptorBufferInfo bi{m_ub[i], 0, sizeof(UBO)};
+        VkDescriptorImageInfo  ii{is, iv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+        std::array<VkWriteDescriptorSet, 2> w{};
+        w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[0].dstSet          = gm.ds[i];
+        w[0].dstBinding      = 0;
+        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[0].descriptorCount = 1;
+        w[0].pBufferInfo     = &bi;
+
+        w[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[1].dstSet          = gm.ds[i];
+        w[1].dstBinding      = 1;
+        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[1].descriptorCount = 1;
+        w[1].pImageInfo      = &ii;
+
+        vkUpdateDescriptorSets(m_dev, w.size(), w.data(), 0, nullptr);
+    }
+}
+
+// Загружаем текстуру в конкретный меш
+void Renderer::uploadTextureToMesh(GpuMesh& gm, const std::string& path) {
+    int w, h, ch;
+    stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+    if (!px) {
+        std::cerr << "failed to load texture: " << path << "\n";
+        return;
+    }
+    std::cout << "loaded texture: " << path << "\n";
+
+    VkDeviceSize sz = w * h * 4;
+    VkBuffer sb; VkDeviceMemory sm;
+    mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+    void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
+    memcpy(p, px, sz);
+    vkUnmapMemory(m_dev, sm);
+    stbi_image_free(px);
+
+    mkImg(w, h, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gm.texImg, gm.texMem);
+    transitionImg(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    cpBufToImg(sb, gm.texImg, w, h);
+    transitionImg(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkDestroyBuffer(m_dev, sb, nullptr);
+    vkFreeMemory(m_dev, sm, nullptr);
+
+    gm.texView = mkView(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkSamplerCreateInfo si{};
+    si.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter        = VK_FILTER_LINEAR;
+    si.minFilter        = VK_FILTER_LINEAR;
+    si.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.anisotropyEnable = VK_TRUE;
+    si.maxAnisotropy    = 16.f;
+    si.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    vkCreateSampler(m_dev, &si, nullptr, &gm.texSampler);
+
+    gm.hasTex = true;
+}
+
+void Renderer::uploadMesh(const MeshData& mesh) {
+    GpuMesh gm;
+    gm.count = mesh.indices.size();
+
+    auto upload = [&](const void* data, VkDeviceSize sz, VkBufferUsageFlags usage,
+                      VkBuffer& buf, VkDeviceMemory& mem) {
+        VkBuffer sb; VkDeviceMemory sm;
+        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+        void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
+        memcpy(p, data, sz);
+        vkUnmapMemory(m_dev, sm);
+        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT|usage,
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buf, mem);
+        cpBuf(sb, buf, sz);
+        vkDestroyBuffer(m_dev, sb, nullptr);
+        vkFreeMemory(m_dev, sm, nullptr);
+    };
+
+    upload(mesh.vertices.data(), sizeof(Vertex)*mesh.vertices.size(),
+           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gm.vb, gm.vm);
+    upload(mesh.indices.data(), sizeof(uint32_t)*mesh.indices.size(),
+           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gm.ib, gm.im);
+
+    // Грузим текстуру из MTL, если она есть
+    if (!mesh.texturePath.empty() && std::filesystem::exists(mesh.texturePath))
+        uploadTextureToMesh(gm, mesh.texturePath);
+
+    allocMeshDescSets(gm);
+    writeMeshDescSets(gm);
+
+    m_meshes.push_back(std::move(gm));
+}
+
+void Renderer::clearMeshes() {
+    vkDeviceWaitIdle(m_dev);
+    for (auto& gm : m_meshes) {
+        vkDestroyBuffer(m_dev, gm.vb, nullptr); vkFreeMemory(m_dev, gm.vm, nullptr);
+        vkDestroyBuffer(m_dev, gm.ib, nullptr); vkFreeMemory(m_dev, gm.im, nullptr);
+        if (gm.hasTex) {
+            vkDestroySampler(m_dev, gm.texSampler, nullptr);
+            vkDestroyImageView(m_dev, gm.texView, nullptr);
+            vkDestroyImage(m_dev, gm.texImg, nullptr);
+            vkFreeMemory(m_dev, gm.texMem, nullptr);
+        }
+    }
+    m_meshes.clear();
 }
 
 bool Renderer::beginFrame() {
@@ -583,14 +704,17 @@ void Renderer::draw(int idx, const glm::mat4& model) {
     if (!m_recording || idx < 0 || idx >= (int)m_meshes.size()) return;
     updateUBO(m_frame, model);
 
-    auto cmd = m_cmds[m_frame];
+    auto& gm  = m_meshes[idx];
+    auto  cmd = m_cmds[m_frame];
+
+    // Биндим дескрипторный сет именно этого меша (с его текстурой)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                             m_pl, 0, 1, &m_ds[m_frame], 0, nullptr);
+                             m_pl, 0, 1, &gm.ds[m_frame], 0, nullptr);
 
     VkDeviceSize off = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &m_meshes[idx].vb, &off);
-    vkCmdBindIndexBuffer(cmd, m_meshes[idx].ib, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmd, m_meshes[idx].count, 1, 0, 0, 0);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vb, &off);
+    vkCmdBindIndexBuffer(cmd, gm.ib, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd, gm.count, 1, 0, 0, 0);
 }
 
 void Renderer::endFrame() {
@@ -630,93 +754,6 @@ void Renderer::endFrame() {
     m_frame = (m_frame + 1) % FRAMES;
 }
 
-void Renderer::uploadMesh(const MeshData& mesh) {
-    GpuMesh gm;
-    gm.count = mesh.indices.size();
-
-    auto upload = [&](const void* data, VkDeviceSize sz, VkBufferUsageFlags usage,
-                      VkBuffer& buf, VkDeviceMemory& mem) {
-        VkBuffer sb; VkDeviceMemory sm;
-        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
-        void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
-        memcpy(p, data, sz);
-        vkUnmapMemory(m_dev, sm);
-        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT|usage,
-              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buf, mem);
-        cpBuf(sb, buf, sz);
-        vkDestroyBuffer(m_dev, sb, nullptr);
-        vkFreeMemory(m_dev, sm, nullptr);
-    };
-
-    upload(mesh.vertices.data(), sizeof(Vertex)*mesh.vertices.size(),
-           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gm.vb, gm.vm);
-    upload(mesh.indices.data(), sizeof(uint32_t)*mesh.indices.size(),
-           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gm.ib, gm.im);
-
-    m_meshes.push_back(gm);
-}
-
-void Renderer::uploadTexture(const std::string& path) {
-    int w, h, ch;
-    stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
-    if (!px) { std::cerr << "failed to load texture: " << path << "\n"; return; }
-
-    VkDeviceSize sz = w * h * 4;
-    VkBuffer sb; VkDeviceMemory sm;
-    mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
-    void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
-    memcpy(p, px, sz);
-    vkUnmapMemory(m_dev, sm);
-    stbi_image_free(px);
-
-    if (m_hasTex) {
-        vkDeviceWaitIdle(m_dev);
-        vkDestroySampler(m_dev, m_texS, nullptr);
-        vkDestroyImageView(m_dev, m_texV, nullptr);
-        vkDestroyImage(m_dev, m_texImg, nullptr);
-        vkFreeMemory(m_dev, m_texMem, nullptr);
-    }
-
-    mkImg(w, h, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
-          VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
-          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_texImg, m_texMem);
-    transitionImg(m_texImg, VK_FORMAT_R8G8B8A8_SRGB,
-                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    cpBufToImg(sb, m_texImg, w, h);
-    transitionImg(m_texImg, VK_FORMAT_R8G8B8A8_SRGB,
-                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    vkDestroyBuffer(m_dev, sb, nullptr);
-    vkFreeMemory(m_dev, sm, nullptr);
-
-    m_texV = mkView(m_texImg, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
-
-    VkSamplerCreateInfo si{};
-    si.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter        = VK_FILTER_LINEAR;
-    si.minFilter        = VK_FILTER_LINEAR;
-    si.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.anisotropyEnable = VK_TRUE;
-    si.maxAnisotropy    = 16.f;
-    si.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    vkCreateSampler(m_dev, &si, nullptr, &m_texS);
-
-    m_hasTex = true;
-    vkDeviceWaitIdle(m_dev);
-    refreshDescSets();
-}
-
-void Renderer::clearMeshes() {
-    vkDeviceWaitIdle(m_dev);
-    for (auto& m : m_meshes) {
-        vkDestroyBuffer(m_dev, m.vb, nullptr); vkFreeMemory(m_dev, m.vm, nullptr);
-        vkDestroyBuffer(m_dev, m.ib, nullptr); vkFreeMemory(m_dev, m.im, nullptr);
-    }
-    m_meshes.clear();
-}
-
 void Renderer::setCamera(glm::vec3 eye, glm::vec3 target, glm::vec3 up) {
     m_ubo.view    = glm::lookAt(eye, target, up);
     m_ubo.viewPos = glm::vec4(eye, 0);
@@ -737,32 +774,6 @@ void Renderer::updateUBO(uint32_t frame, const glm::mat4& model) {
     m_ubo.proj  = glm::perspective(glm::radians(90.f), m_win.aspect(), 0.01f, 1000.f);
     m_ubo.proj[1][1] *= -1;
     memcpy(m_ubp[frame], &m_ubo, sizeof(m_ubo));
-}
-
-void Renderer::refreshDescSets() {
-    VkImageView  iv = m_hasTex ? m_texV : m_wV;
-    VkSampler    is = m_hasTex ? m_texS : m_wS;
-    for (int i = 0; i < FRAMES; i++) {
-        VkDescriptorBufferInfo bi{m_ub[i], 0, sizeof(UBO)};
-        VkDescriptorImageInfo  ii{is, iv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-
-        std::array<VkWriteDescriptorSet, 2> w{};
-        w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[0].dstSet          = m_ds[i];
-        w[0].dstBinding      = 0;
-        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w[0].descriptorCount = 1;
-        w[0].pBufferInfo     = &bi;
-
-        w[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[1].dstSet          = m_ds[i];
-        w[1].dstBinding      = 1;
-        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[1].descriptorCount = 1;
-        w[1].pImageInfo      = &ii;
-
-        vkUpdateDescriptorSets(m_dev, w.size(), w.data(), 0, nullptr);
-    }
 }
 
 void Renderer::destroySwapchain() {

@@ -16,8 +16,8 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
+    // uploadMesh теперь сам грузит текстуру из mesh.texturePath (если есть)
     void uploadMesh(const MeshData& mesh);
-    void uploadTexture(const std::string& path);
     void clearMeshes();
 
     bool beginFrame();
@@ -44,9 +44,20 @@ private:
         VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
         VkDeviceMemory vm = VK_NULL_HANDLE, im = VK_NULL_HANDLE;
         uint32_t count = 0;
+
+        // Своя текстура на каждый меш
+        VkImage        texImg  = VK_NULL_HANDLE;
+        VkDeviceMemory texMem  = VK_NULL_HANDLE;
+        VkImageView    texView = VK_NULL_HANDLE;
+        VkSampler      texSampler = VK_NULL_HANDLE;
+        bool           hasTex  = false;
+
+        // Свои дескрипторные сеты на каждый меш (по одному на каждый frame-in-flight)
+        std::array<VkDescriptorSet, 2> ds{};
     };
 
     static constexpr int FRAMES = 2;
+    static constexpr int MAX_MESHES = 64; // максимум мешей в пуле
 
     void initInstance();
     void initSurface();
@@ -62,7 +73,6 @@ private:
     void initWhiteTex();
     void initUBOs();
     void initDescPool();
-    void initDescSets();
     void initCmdBuffers();
     void initSync();
 
@@ -91,7 +101,9 @@ private:
     VkCommandBuffer beginOnce();
     void            endOnce(VkCommandBuffer);
 
-    void refreshDescSets();
+    void allocMeshDescSets(GpuMesh& gm);
+    void writeMeshDescSets(GpuMesh& gm);
+    void uploadTextureToMesh(GpuMesh& gm, const std::string& path);
     void updateUBO(uint32_t frame, const glm::mat4& model);
 
     Window& m_win;
@@ -122,37 +134,30 @@ private:
     VkPipelineLayout      m_pl   = VK_NULL_HANDLE;
     VkPipeline            m_pipe = VK_NULL_HANDLE;
 
-    VkCommandPool                       m_cp = VK_NULL_HANDLE;
-    std::vector<VkCommandBuffer>        m_cmds;
+    VkCommandPool                m_cp = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> m_cmds;
 
-    std::array<VkBuffer,       FRAMES>  m_ub  {};
-    std::array<VkDeviceMemory, FRAMES>  m_ubm {};
-    std::array<void*,          FRAMES>  m_ubp {};
+    std::array<VkBuffer,       FRAMES> m_ub  {};
+    std::array<VkDeviceMemory, FRAMES> m_ubm {};
+    std::array<void*,          FRAMES> m_ubp {};
 
-    VkDescriptorPool                    m_dp  = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, FRAMES> m_ds  {};
+    VkDescriptorPool m_dp = VK_NULL_HANDLE;
 
-    VkImage        m_texImg = VK_NULL_HANDLE;
-    VkDeviceMemory m_texMem = VK_NULL_HANDLE;
-    VkImageView    m_texV   = VK_NULL_HANDLE;
-    VkSampler      m_texS   = VK_NULL_HANDLE;
-    bool           m_hasTex = false;
-
-    VkImage        m_wImg   = VK_NULL_HANDLE;
-    VkDeviceMemory m_wMem   = VK_NULL_HANDLE;
-    VkImageView    m_wV     = VK_NULL_HANDLE;
-    VkSampler      m_wS     = VK_NULL_HANDLE;
+    // Белая текстура-заглушка для мешей без текстуры
+    VkImage        m_wImg = VK_NULL_HANDLE;
+    VkDeviceMemory m_wMem = VK_NULL_HANDLE;
+    VkImageView    m_wV   = VK_NULL_HANDLE;
+    VkSampler      m_wS   = VK_NULL_HANDLE;
 
     std::vector<GpuMesh> m_meshes;
 
-    std::array<VkSemaphore, FRAMES> m_imgReady  {};
-    std::array<VkSemaphore, FRAMES> m_renDone   {};
-    std::array<VkFence,     FRAMES> m_fence     {};
+    std::array<VkSemaphore, FRAMES> m_imgReady{};
+    std::array<VkSemaphore, FRAMES> m_renDone{};
+    std::array<VkFence,     FRAMES> m_fence{};
 
-    uint32_t m_frame     = 0;
-    uint32_t m_imgIdx    = 0;
+    UBO      m_ubo{};
+    uint32_t m_frame  = 0;
+    uint32_t m_imgIdx = 0;
     bool     m_recording = false;
-    bool     m_validation= false;
-
-    UBO m_ubo{};
+    bool     m_validation = false;
 };

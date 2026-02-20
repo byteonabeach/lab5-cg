@@ -1,5 +1,2 @@
 .xmake/
 build/
-assets/*.obj
-assets/*.mtl
-assets/*.png
