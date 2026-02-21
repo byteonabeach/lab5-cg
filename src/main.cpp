@@ -3,7 +3,6 @@
 #include "Timer.h"
 #include "Renderer.h"
 #include "Mesh.h"
-
 #include <glm/gtc/matrix_transform.hpp>
 #include <filesystem>
 #include <iostream>
