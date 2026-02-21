@@ -636,7 +636,6 @@ void Renderer::uploadMesh(const MeshData& mesh) {
     upload(mesh.indices.data(), sizeof(uint32_t)*mesh.indices.size(),
            VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gm.ib, gm.im);
 
-    // Грузим текстуру из MTL, если она есть
     if (!mesh.texturePath.empty() && std::filesystem::exists(mesh.texturePath))
         uploadTextureToMesh(gm, mesh.texturePath);
 
