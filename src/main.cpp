@@ -49,7 +49,6 @@ int main() {
         return 1;
     }
 
-    // Фолбэк: если MTL не задал текстуру — ищем любой PNG/JPG рядом с .obj
     std::string fallbackTex = findTexture(fs::path(objPath).parent_path());
     if (!fallbackTex.empty())
         std::cout << "fallback texture: " << fallbackTex << "\n";
@@ -65,7 +64,6 @@ int main() {
     float     pitch = -10.f;
     Timer     timer;
 
-    // Режим UV анимации: 0 = нет, 1 = скроллинг, 2 = пульсация тайлинга
     int uvMode = 0;
 
     while (!window.shouldClose()) {
@@ -77,20 +75,18 @@ int main() {
         float total = timer.total();
 
         if (Input::get().isDown(GLFW_KEY_ESCAPE)) break;
-
-        // Переключение режима UV анимации клавишами 1/2/3
         if (Input::get().pressed(GLFW_KEY_1)) uvMode = 0;
         if (Input::get().pressed(GLFW_KEY_2)) uvMode = 1;
         if (Input::get().pressed(GLFW_KEY_3)) uvMode = 2;
 
         switch (uvMode) {
-            case 0: // Нет анимации
+            case 0:
                 renderer.setUV({0.f, 0.f}, {1.f, 1.f});
                 break;
-            case 1: // Скроллинг
+            case 1:
                 renderer.setUV({total * 0.1f, total * 0.05f}, {1.f, 1.f});
                 break;
-            case 2: // Пульсация тайлинга
+            case 2:
                 renderer.setUV({0.f, 0.f}, {
                     1.f + 0.5f * sinf(total),
                     1.f + 0.5f * sinf(total)

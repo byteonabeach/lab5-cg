@@ -59,7 +59,6 @@ Renderer::~Renderer() {
 
     clearMeshes();
 
-    // Белая текстура
     if (m_wS)   vkDestroySampler(m_dev, m_wS, nullptr);
     if (m_wV)   vkDestroyImageView(m_dev, m_wV, nullptr);
     if (m_wImg) vkDestroyImage(m_dev, m_wImg, nullptr);
@@ -154,9 +153,10 @@ void Renderer::initDevice() {
     if (!n) throw std::runtime_error("no Vulkan GPU found");
     std::vector<VkPhysicalDevice> devs(n);
     vkEnumeratePhysicalDevices(m_inst, &n, devs.data());
-    for (auto d : devs) {
+
+    for (auto d : devs)
         if (deviceOk(d)) { m_gpu = d; break; }
-    }
+
     if (!m_gpu) throw std::runtime_error("no suitable GPU");
 
     auto qfi = findQFI(m_gpu);
@@ -185,6 +185,7 @@ void Renderer::initDevice() {
     ci.enabledExtensionCount   = kDevExts.size();
     ci.ppEnabledExtensionNames = kDevExts.data();
     ci.pEnabledFeatures        = &feat;
+
     if (m_validation) {
         ci.enabledLayerCount   = kLayers.size();
         ci.ppEnabledLayerNames = kLayers.data();

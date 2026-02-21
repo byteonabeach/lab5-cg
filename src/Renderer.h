@@ -16,7 +16,6 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    // uploadMesh теперь сам грузит текстуру из mesh.texturePath (если есть)
     void uploadMesh(const MeshData& mesh);
     void clearMeshes();
 
@@ -45,19 +44,17 @@ private:
         VkDeviceMemory vm = VK_NULL_HANDLE, im = VK_NULL_HANDLE;
         uint32_t count = 0;
 
-        // Своя текстура на каждый меш
         VkImage        texImg  = VK_NULL_HANDLE;
         VkDeviceMemory texMem  = VK_NULL_HANDLE;
         VkImageView    texView = VK_NULL_HANDLE;
         VkSampler      texSampler = VK_NULL_HANDLE;
         bool           hasTex  = false;
 
-        // Свои дескрипторные сеты на каждый меш (по одному на каждый frame-in-flight)
         std::array<VkDescriptorSet, 2> ds{};
     };
 
     static constexpr int FRAMES = 2;
-    static constexpr int MAX_MESHES = 64; // максимум мешей в пуле
+    static constexpr int MAX_MESHES = 64;
 
     void initInstance();
     void initSurface();
@@ -143,7 +140,6 @@ private:
 
     VkDescriptorPool m_dp = VK_NULL_HANDLE;
 
-    // Белая текстура-заглушка для мешей без текстуры
     VkImage        m_wImg = VK_NULL_HANDLE;
     VkDeviceMemory m_wMem = VK_NULL_HANDLE;
     VkImageView    m_wV   = VK_NULL_HANDLE;
