@@ -1,16 +1,16 @@
 #include "Renderer.h"
+#include <vulkan/vulkan_core.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include <glm/gtc/matrix_transform.hpp>
-
+#include "Mesh.h"
 #include <fstream>
 #include <stdexcept>
 #include <iostream>
 #include <set>
 #include <algorithm>
 #include <cstring>
-#include <limits>
 #include <filesystem>
 
 static const std::vector<const char*> kDevExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -64,7 +64,7 @@ Renderer::~Renderer() {
     if (m_wImg) vkDestroyImage(m_dev, m_wImg, nullptr);
     if (m_wMem) vkFreeMemory(m_dev, m_wMem, nullptr);
 
-    for (int i = 0; i < FRAMES; i++) {
+    for (int i = 0; i < FRAMES; ++i) {
         vkDestroyBuffer(m_dev, m_ub[i], nullptr);
         vkFreeMemory(m_dev, m_ubm[i], nullptr);
     }
@@ -76,7 +76,7 @@ Renderer::~Renderer() {
     vkDestroyRenderPass(m_dev, m_rp, nullptr);
     vkDestroyCommandPool(m_dev, m_cp, nullptr);
 
-    for (int i = 0; i < FRAMES; i++) {
+    for (int i = 0; i < FRAMES; ++i) {
         vkDestroySemaphore(m_dev, m_imgReady[i], nullptr);
         vkDestroySemaphore(m_dev, m_renDone[i], nullptr);
         vkDestroyFence(m_dev, m_fence[i], nullptr);
@@ -248,7 +248,7 @@ void Renderer::initSwapchain() {
 
 void Renderer::initImageViews() {
     m_scViews.resize(m_scImgs.size());
-    for (size_t i = 0; i < m_scImgs.size(); i++)
+    for (size_t i = 0; i < m_scImgs.size(); ++i)
         m_scViews[i] = mkView(m_scImgs[i], m_scFmt, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
@@ -316,7 +316,7 @@ void Renderer::initDepth() {
 
 void Renderer::initFramebuffers() {
     m_fbs.resize(m_scViews.size());
-    for (size_t i = 0; i < m_scViews.size(); i++) {
+    for (size_t i = 0; i < m_scViews.size(); ++i) {
         std::array<VkImageView, 2> atts = {m_scViews[i], m_dv};
         VkFramebufferCreateInfo fi{};
         fi.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -401,7 +401,7 @@ void Renderer::initPipeline() {
     rs.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode    = VK_CULL_MODE_BACK_BIT;
-    rs.frontFace   = VK_FRONT_FACE_CLOCKWISE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth   = 1.f;
 
     VkPipelineMultisampleStateCreateInfo ms{};
@@ -486,7 +486,7 @@ void Renderer::initWhiteTex() {
 }
 
 void Renderer::initUBOs() {
-    for (int i = 0; i < FRAMES; i++) {
+    for (int i = 0; i < FRAMES; ++i) {
         mkBuf(sizeof(UBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
               m_ub[i], m_ubm[i]);
@@ -495,11 +495,11 @@ void Renderer::initUBOs() {
 }
 
 void Renderer::initDescPool() {
-    // Пул на MAX_MESHES мешей * FRAMES кадров
     std::array<VkDescriptorPoolSize, 2> sz = {{
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         MAX_MESHES * FRAMES},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_MESHES * FRAMES},
     }};
+
     VkDescriptorPoolCreateInfo ci{};
     ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.poolSizeCount = sz.size();
@@ -522,14 +522,13 @@ void Renderer::initSync() {
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo     fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (int i = 0; i < FRAMES; i++) {
+    for (int i = 0; i < FRAMES; ++i) {
         vkCreateSemaphore(m_dev, &si, nullptr, &m_imgReady[i]);
         vkCreateSemaphore(m_dev, &si, nullptr, &m_renDone[i]);
         vkCreateFence(m_dev, &fi, nullptr, &m_fence[i]);
     }
 }
 
-// Аллоцируем FRAMES дескрипторных сетов из пула для одного меша
 void Renderer::allocMeshDescSets(GpuMesh& gm) {
     std::vector<VkDescriptorSetLayout> layouts(FRAMES, m_dsl);
     VkDescriptorSetAllocateInfo ai{};
@@ -540,12 +539,11 @@ void Renderer::allocMeshDescSets(GpuMesh& gm) {
     vkAllocateDescriptorSets(m_dev, &ai, gm.ds.data());
 }
 
-// Записываем дескрипторы: UBO + текстура (или белая заглушка)
 void Renderer::writeMeshDescSets(GpuMesh& gm) {
     VkImageView  iv = gm.hasTex ? gm.texView    : m_wV;
     VkSampler    is = gm.hasTex ? gm.texSampler : m_wS;
 
-    for (int i = 0; i < FRAMES; i++) {
+    for (int i = 0; i < FRAMES; ++i) {
         VkDescriptorBufferInfo bi{m_ub[i], 0, sizeof(UBO)};
         VkDescriptorImageInfo  ii{is, iv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
@@ -708,7 +706,6 @@ void Renderer::draw(int idx, const glm::mat4& model) {
     auto& gm  = m_meshes[idx];
     auto  cmd = m_cmds[m_frame];
 
-    // Биндим дескрипторный сет именно этого меша (с его текстурой)
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                              m_pl, 0, 1, &gm.ds[m_frame], 0, nullptr);
 
@@ -800,7 +797,7 @@ Renderer::QFI Renderer::findQFI(VkPhysicalDevice dev) {
     uint32_t n; vkGetPhysicalDeviceQueueFamilyProperties(dev, &n, nullptr);
     std::vector<VkQueueFamilyProperties> fams(n);
     vkGetPhysicalDeviceQueueFamilyProperties(dev, &n, fams.data());
-    for (uint32_t i = 0; i < n; i++) {
+    for (uint32_t i = 0; i < n; ++i) {
         if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) qi.gfx = i;
         VkBool32 ps = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, m_surf, &ps);
@@ -873,7 +870,7 @@ VkFormat Renderer::findFmt(const std::vector<VkFormat>& cands, VkImageTiling til
 
 uint32_t Renderer::memType(uint32_t filter, VkMemoryPropertyFlags props) {
     VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(m_gpu, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
         if ((filter & (1<<i)) && (mp.memoryTypes[i].propertyFlags & props) == props) return i;
     throw std::runtime_error("no suitable memory type");
 }

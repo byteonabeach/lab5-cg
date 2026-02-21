@@ -1,11 +1,10 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
-
+#include <unordered_map>
 #include "Mesh.h"
 #include <filesystem>
 #include <stdexcept>
 #include <iostream>
-#include <unordered_map>
 #include <fstream>
 #include <sstream>
 
@@ -33,14 +32,12 @@ static std::string readFirstMtlName(const std::string& mtlText) {
     return {};
 }
 
-// Патчим OBJ: подменяем mtllib (не нужен при ParseFromString) и все usemtl
 static std::string patchOBJ(const std::string& objText, const std::string& realMatName) {
     std::istringstream in(objText);
     std::ostringstream out;
     std::string line;
     while (std::getline(in, line)) {
-        if (line.rfind("mtllib", 0) == 0)
-            ; // убираем — при ParseFromString MTL передаётся отдельно
+        if (line.rfind("mtllib", 0) == 0);
         else if (line.rfind("usemtl", 0) == 0)
             out << "usemtl " << realMatName << "\n";
         else
@@ -52,7 +49,6 @@ static std::string patchOBJ(const std::string& objText, const std::string& realM
 std::vector<MeshData> loadOBJ(const std::string& path) {
     fs::path objDir = fs::path(path).parent_path();
 
-    // Ищем любой .mtl в папке с моделью
     std::string mtlPath;
     for (auto& e : fs::directory_iterator(objDir))
         if (e.path().extension() == ".mtl") { mtlPath = e.path().string(); break; }
@@ -71,7 +67,6 @@ std::vector<MeshData> loadOBJ(const std::string& path) {
         std::cout << "using mtl: " << mtlPath << "\n";
         std::cout << "patching usemtl -> '" << realMatName << "'\n";
 
-        // Передаём OBJ и MTL как строки напрямую
         if (!reader.ParseFromString(objText, mtlText, cfg))
             throw std::runtime_error(reader.Error());
     } else {
