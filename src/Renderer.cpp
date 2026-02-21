@@ -202,6 +202,7 @@ void Renderer::initDevice() {
     std::cout << "gpu: " << props.deviceName << "\n";
 }
 
+
 void Renderer::initSwapchain() {
     auto sc  = querySC(m_gpu);
     auto fmt = pickFmt(sc.fmts);
@@ -566,7 +567,6 @@ void Renderer::writeMeshDescSets(GpuMesh& gm) {
     }
 }
 
-// Загружаем текстуру в конкретный меш
 void Renderer::uploadTextureToMesh(GpuMesh& gm, const std::string& path) {
     int w, h, ch;
     stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
@@ -764,6 +764,12 @@ void Renderer::setLight(glm::vec3 pos, glm::vec3 color, float specPow) {
 void Renderer::setUV(glm::vec2 offset, glm::vec2 scale) {
     m_ubo.uvOffset = offset;
     m_ubo.uvScale  = scale;
+}
+
+
+void Renderer::setAnim(int mode, float time) {
+    m_ubo.animMode = static_cast<float>(mode);
+    m_ubo.time     = time;
 }
 
 void Renderer::updateUBO(uint32_t frame, const glm::mat4& model) {

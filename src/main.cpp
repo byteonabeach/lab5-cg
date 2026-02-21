@@ -63,7 +63,8 @@ int main() {
     float     pitch = -10.f;
     Timer     timer;
 
-    int uvMode = 0;
+    int uvMode   = 0;
+    int animMode = 0;
 
     while (!window.shouldClose()) {
         Input::get().beginFrame();
@@ -74,9 +75,15 @@ int main() {
         float total = timer.total();
 
         if (Input::get().isDown(GLFW_KEY_ESCAPE)) break;
+
         if (Input::get().pressed(GLFW_KEY_1)) uvMode = 0;
         if (Input::get().pressed(GLFW_KEY_2)) uvMode = 1;
         if (Input::get().pressed(GLFW_KEY_3)) uvMode = 2;
+
+        if (Input::get().pressed(GLFW_KEY_4)) animMode = 0;
+        if (Input::get().pressed(GLFW_KEY_5)) animMode = 1;
+        if (Input::get().pressed(GLFW_KEY_6)) animMode = 2;
+        if (Input::get().pressed(GLFW_KEY_7)) animMode = 3;
 
         switch (uvMode) {
             case 0:
@@ -92,6 +99,8 @@ int main() {
                 });
                 break;
         }
+
+        renderer.setAnim(animMode, total);
 
         auto d = Input::get().delta();
         yaw   += d.x * 0.12f;
@@ -124,8 +133,10 @@ int main() {
         static float t = 0; t += dt;
         if (t > 0.5f) {
             t = 0;
+            static const char* animNames[] = {"off", "wave", "pulse", "twist"};
             window.setTitle("VulkanApp | " + std::to_string(timer.fps()) +
-                            " fps | UV mode: " + std::to_string(uvMode + 1));
+                            " fps | UV:" + std::to_string(uvMode + 1) +
+                            " | Anim:" + animNames[animMode]);
         }
     }
 }

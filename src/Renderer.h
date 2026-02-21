@@ -26,6 +26,7 @@ public:
     void setCamera(glm::vec3 eye, glm::vec3 target, glm::vec3 up);
     void setLight(glm::vec3 pos, glm::vec3 color, float specPow = 64.f);
     void setUV(glm::vec2 offset, glm::vec2 scale);
+    void setAnim(int mode, float time);
 
     int meshCount() const { return (int)m_meshes.size(); }
 

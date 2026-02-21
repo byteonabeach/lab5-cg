@@ -32,6 +32,9 @@ struct alignas(16) UBO {
     glm::vec4 viewPos;
     glm::vec2 uvOffset;
     glm::vec2 uvScale;
+    float     time;
+    float     animMode;
+    float     _pad[2];
 };
 
 struct MeshData {
