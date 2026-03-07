@@ -67,13 +67,18 @@ void RenderingSystem::onResize(Engine& engine) {
 
 void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<SceneObject>& objects, Engine& engine) {
     auto ext = engine.getSwapExtent();
+
     GeomUBO gubo{};
     gubo.view = camera.view();
     gubo.proj = camera.projection((float)ext.width / (float)ext.height);
     memcpy(geomUBOMapped[frameIndex], &gubo, sizeof(GeomUBO));
+
     LightsUBO lubo{};
     lubo.viewPos = glm::vec4(camera.position, 1.0f);
     lubo.ambientColor = glm::vec4(0.08f, 0.08f, 0.10f, 1.0f);
+    // Считаем обратную видово-проекционную матрицу
+    lubo.invViewProj = glm::inverse(gubo.proj * gubo.view);
+
     int cnt = std::min((int)pendingLights.size(), MAX_LIGHTS);
     lubo.countPad.x = cnt;
     for (int i = 0; i < cnt; ++i) lubo.lights[i] = pendingLights[i];
@@ -87,21 +92,17 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             rpi.framebuffer = shadowFramebuffers[layer];
             rpi.renderArea.extent = {2048, 2048};
             VkClearValue cv; cv.depthStencil = {1.0f, 0};
-            rpi.clearValueCount = 1;
-            rpi.pClearValues = &cv;
+            rpi.clearValueCount = 1; rpi.pClearValues = &cv;
             vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
-            VkViewport vp{0, 0, 2048.0f, 2048.0f, 0.0f, 1.0f};
-            VkRect2D sc{{0, 0}, {2048, 2048}};
-            vkCmdSetViewport(cmd, 0, 1, &vp);
-            vkCmdSetScissor(cmd, 0, 1, &sc);
+            VkViewport vp{0, 0, 2048.0f, 2048.0f, 0.0f, 1.0f}; VkRect2D sc{{0, 0}, {2048, 2048}};
+            vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
             for (const auto& obj : objects) {
                 if (obj.unlit) continue;
                 for (const auto& sm : obj.submeshes) {
                     if (!sm.mesh.valid()) continue;
                     ShadowPC spc{};
-                    spc.model = obj.transform;
-                    spc.lightSpace = pendingLights[i].lightSpace;
+                    spc.model = obj.transform; spc.lightSpace = pendingLights[i].lightSpace;
                     vkCmdPushConstants(cmd, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &spc);
                     engine.bindAndDrawMesh_(cmd, sm.mesh);
                 }
@@ -110,8 +111,12 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         }
     }
 
-    std::array<VkClearValue, 4> clears{};
-    clears[0].color = {0,0,0,0}; clears[1].color = {0,0,0,0}; clears[2].color = {0,0,0,0}; clears[3].depthStencil = {1.0f, 0};
+    // ТЕПЕРЬ ОЧИЩАЕМ ТОЛЬКО 3 ЭЛЕМЕНТА (2 Цвета + 1 Глубина)
+    std::array<VkClearValue, 3> clears{};
+    clears[0].color = {0,0,0,0};
+    clears[1].color = {0,0,0,0};
+    clears[2].depthStencil = {1.0f, 0};
+
     VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpi.renderPass = gbuffer.getRenderPass(); rpi.framebuffer = gbuffer.getFramebuffer();
     rpi.renderArea.extent = ext; rpi.clearValueCount = (uint32_t)clears.size(); rpi.pClearValues = clears.data();
@@ -124,9 +129,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         for (const auto& sm : obj.submeshes) {
             if (!sm.mesh.valid()) continue;
             GeomPC gpc{};
-            gpc.model = obj.transform;
-            gpc.color = obj.unlitColor;
-            gpc.isUnlit = obj.unlit ? 1 : 0;
+            gpc.model = obj.transform; gpc.color = obj.unlitColor; gpc.isUnlit = obj.unlit ? 1 : 0;
             vkCmdPushConstants(cmd, geomPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GeomPC), &gpc);
             if (!obj.unlit && sm.texture.valid()) {
                 VkDescriptorSet matSet = engine.getTextureSet(sm.texture);
@@ -362,18 +365,28 @@ void RenderingSystem::createDescriptors_(Engine& engine) {
 void RenderingSystem::updateLightDescSets_(Engine& engine) {
     VkDevice dev = engine.getDevice();
     VkSampler gbSampler = gbuffer.getSampler();
-    VkImageView gbViews[3] = {gbuffer.getPositionView(), gbuffer.getNormalView(), gbuffer.getAlbedoView()};
+
+    VkImageView gbViews[3] = {gbuffer.getNormalView(), gbuffer.getAlbedoView(), gbuffer.getDepthView()};
+
     for (int i = 0; i < Engine::MAX_FRAMES; ++i) {
         std::array<VkWriteDescriptorSet, 5> writes{};
         std::array<VkDescriptorImageInfo, 3> imgInfos{};
         for (int b = 0; b < 3; ++b) {
             imgInfos[b] = {gbSampler, gbViews[b], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[b].dstSet = lightDescSets[i]; writes[b].dstBinding = (uint32_t)b; writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[b].descriptorCount = 1; writes[b].pImageInfo = &imgInfos[b];
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[b].dstSet = lightDescSets[i];
+            writes[b].dstBinding = (uint32_t)b; writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[b].descriptorCount = 1; writes[b].pImageInfo = &imgInfos[b];
         }
         VkDescriptorBufferInfo uboInfo{lightUBOBufs[i], 0, sizeof(LightsUBO)};
-        writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[3].dstSet = lightDescSets[i]; writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; writes[3].descriptorCount = 1; writes[3].pBufferInfo = &uboInfo;
+        writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[3].dstSet = lightDescSets[i];
+        writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[3].descriptorCount = 1; writes[3].pBufferInfo = &uboInfo;
+
         VkDescriptorImageInfo shadowInfo{shadowSampler, shadowArrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[4].dstSet = lightDescSets[i]; writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[4].descriptorCount = 1; writes[4].pImageInfo = &shadowInfo;
+        writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[4].dstSet = lightDescSets[i];
+        writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[4].descriptorCount = 1; writes[4].pImageInfo = &shadowInfo;
+
         vkUpdateDescriptorSets(dev, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 }
