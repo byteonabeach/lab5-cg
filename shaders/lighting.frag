@@ -73,6 +73,7 @@ vec3 evaluateLight(LightData light, vec3 fragPos, vec3 N, vec3 albedo, vec3 view
                     pcf += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
                 }
             }
+
             shadow = pcf / 9.0;
         }
     }
