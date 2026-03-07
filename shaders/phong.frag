@@ -28,15 +28,15 @@ void main() {
     vec3 ambient = ubo.ambientColor.rgb * texColor;
 
     // Diffuse
-    vec3 norm     = normalize(fragNormal);
+    vec3 norm = normalize(fragNormal);
     vec3 lightDir = normalize(ubo.lightPos.xyz - fragPos);
-    float diff    = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse  = diff * ubo.lightColor.rgb * texColor;
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * ubo.lightColor.rgb * texColor;
 
     // Specular (Blinn-Phong half-vector)
-    vec3 viewDir  = normalize(ubo.viewPos.xyz - fragPos);
-    vec3 halfDir  = normalize(lightDir + viewDir);
-    float spec    = pow(max(dot(norm, halfDir), 0.0), 64.0);
+    vec3 viewDir = normalize(ubo.viewPos.xyz - fragPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(norm, halfDir), 0.0), 64.0);
     vec3 specular = spec * ubo.lightColor.rgb * 0.3;
 
     vec3 result = ambient + diffuse + specular;

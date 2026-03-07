@@ -11,7 +11,7 @@ include(FetchContent)
 
 FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
-    GIT_TAG        0.9.9.8)
+    GIT_TAG        1.0.3)
 FetchContent_MakeAvailable(glm)
 
 FetchContent_Declare(tinyobjloader
@@ -24,7 +24,7 @@ FetchContent_Declare(stb
     GIT_TAG        master)
 FetchContent_MakeAvailable(stb)
 
-# ── Executable ────────────────────────────────────────────────────────────────
+
 add_executable(VulkanDeferred
     src/main.cpp
     src/Engine.cpp
@@ -50,7 +50,7 @@ target_compile_definitions(VulkanDeferred PRIVATE
     $<$<CONFIG:Debug>:ENABLE_VALIDATION_LAYERS>
 )
 
-# ── Compile shaders ───────────────────────────────────────────────────────────
+
 find_program(GLSLC glslc HINTS ENV VULKAN_SDK PATH_SUFFIXES bin)
 if(NOT GLSLC)
     message(FATAL_ERROR "glslc not found — install Vulkan SDK")
@@ -65,6 +65,9 @@ set(SHADERS
     gbuffer.frag
     lighting.vert
     lighting.frag
+    phong.vert
+    phong.frag
+    shadows.vert
 )
 
 foreach(SHADER ${SHADERS})
