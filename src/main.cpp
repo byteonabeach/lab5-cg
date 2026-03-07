@@ -15,6 +15,13 @@
 
 namespace fs = std::filesystem;
 
+struct FallingFlashlight {
+    glm::vec3 position;
+    glm::vec3 velocity;
+    glm::vec3 color;
+    SceneObject object;
+};
+
 static std::string normSlashes(std::string p) {
     for (char& c : p) if (c == '\\') c = '/';
     return p;
@@ -126,6 +133,13 @@ int main() {
     MeshHandle cubeMesh = createCubeMesh(engine);
     std::vector<SceneObject> objects;
 
+    std::vector<FallingFlashlight> droppedLights;
+    bool fPressedLastFrame = false;
+
+    const float GRAVITY = -9.81f;
+    const float FLOOR_Y = 0.05f;
+
+
     try {
         auto sponza = loadOBJ(engine, "assets/sponza/sponza.obj", false);
         sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
@@ -154,50 +168,95 @@ int main() {
     double lastTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
-        input.update();
-        if (input.wasResized()) {
-            int w=0, h=0;
-            glfwGetFramebufferSize(window, &w, &h);
-            if (w == 0 || h == 0) continue;
-            engine.recreateSwapchain();
-            rs.onResize(engine);
-            input.clearResized();
-        }
-
-        double now = glfwGetTime();
-        float dt = (float)(now - lastTime);
-        lastTime = now;
-        camera.update(input, dt);
-
-        if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
-
-        std::vector<LightData> lights;
-        lights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
-        float px = 3.0f * (float)std::cos(now * 0.5);
-        float pz = 3.0f * (float)std::sin(now * 0.5);
-        lights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
-        lights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
-        rs.setLights(lights);
-
-        for(size_t i=0; i<lights.size(); ++i) {
-            size_t objIdx = objects.size() - 3 + i;
-            if (objIdx < objects.size()) {
-                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(lights[i].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
-                objects[objIdx].unlitColor = lights[i].color * 3.0f;
+            input.update();
+            if (input.wasResized()) {
+                int w=0, h=0;
+                glfwGetFramebufferSize(window, &w, &h);
+                if (w == 0 || h == 0) continue;
+                engine.recreateSwapchain();
+                rs.onResize(engine);
+                input.clearResized();
             }
-        }
 
-        FrameContext ctx = engine.beginFrame();
-        if (!ctx.valid) {
-            engine.recreateSwapchain();
-            rs.onResize(engine);
-            input.clearResized();
-            continue;
-        }
+            double now = glfwGetTime();
+            float dt = (float)(now - lastTime);
+            lastTime = now;
+            camera.update(input, dt);
 
-        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
-        engine.endFrame(ctx);
-    }
+            // 1. ЛОГИКА АНИМАЦИИ И СПАВНА ФОНАРИКОВ
+            if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
+
+            bool fIsDown = input.isKeyDown(GLFW_KEY_F);
+            if (fIsDown && !fPressedLastFrame) {
+                FallingFlashlight fl;
+                fl.position = camera.position;
+                fl.velocity = camera.front() * 10.0f;
+                fl.color = glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f) * 2.0f + 0.5f;
+
+                SubMesh sm;
+                sm.mesh = cubeMesh;
+                sm.texture = engine.createWhiteTexture();
+                fl.object.submeshes.push_back(sm);
+                fl.object.unlit = true;
+                fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
+                droppedLights.push_back(fl);
+            }
+            fPressedLastFrame = fIsDown;
+
+            // 2. ФИЗИКА ФОНАРИКОВ
+            for (auto& fl : droppedLights) {
+                if (fl.position.y > FLOOR_Y) {
+                    fl.velocity.y += GRAVITY * dt;
+                    fl.position += fl.velocity * dt;
+                } else {
+                    fl.position.y = FLOOR_Y;
+                    fl.velocity = glm::vec3(0.0f);
+                }
+                fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+            }
+
+            // 3. ПОДГОТОВКА ВСЕХ ИСТОЧНИКОВ СВЕТА (Static + Dropped)
+            std::vector<LightData> allLights;
+            // Основные источники
+            allLights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
+            float px = 3.0f * (float)std::cos(now * 0.5);
+            float pz = 3.0f * (float)std::sin(now * 0.5);
+            allLights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
+            allLights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
+
+            // Добавляем свет от фонариков
+            for (const auto& fl : droppedLights) {
+                allLights.push_back(Light::makePoint(fl.position, fl.color, 8.0f, 12.0f));
+            }
+
+            if (allLights.size() > 64) allLights.resize(64);
+            rs.setLights(allLights);
+
+            // Обновляем визуальные кубики для основных лампочек (последние 3 объекта в векторе objects)
+            for(size_t i=0; i<3; ++i) {
+                size_t objIdx = objects.size() - 3 + i;
+                if (objIdx < objects.size() && i + 1 < allLights.size()) { // i+1 так как 0-й свет это солнце
+                    objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(allLights[i+1].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+                    objects[objIdx].unlitColor = allLights[i+1].color * 3.0f;
+                }
+            }
+
+            std::vector<SceneObject> frameObjects = objects;
+            for (const auto& fl : droppedLights) {
+                frameObjects.push_back(fl.object);
+            }
+
+            FrameContext ctx = engine.beginFrame();
+            if (!ctx.valid) {
+                engine.recreateSwapchain();
+                rs.onResize(engine);
+                input.clearResized();
+                continue;
+            }
+
+            rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine);
+            engine.endFrame(ctx);
+        }
 
     rs.cleanup(engine);
     engine.cleanup();

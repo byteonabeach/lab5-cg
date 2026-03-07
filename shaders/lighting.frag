@@ -2,9 +2,9 @@
 
 layout(location = 0) in vec2 inUV;
 
-layout(set = 0, binding = 0) uniform sampler2D gPosition;
-layout(set = 0, binding = 1) uniform sampler2D gNormal;
-layout(set = 0, binding = 2) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 0) uniform sampler2D gNormal;
+layout(set = 0, binding = 1) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gDepth;
 layout(set = 0, binding = 4) uniform sampler2DArray shadowMap;
 
 struct LightData {
@@ -20,6 +20,7 @@ layout(set = 0, binding = 3) uniform LightsUBO {
     vec4 viewPos;
     vec4 ambientColor;
     ivec4 countPad;
+    mat4 invViewProj;
     LightData lights[64];
 } lightsUBO;
 
@@ -72,6 +73,7 @@ vec3 evaluateLight(LightData light, vec3 fragPos, vec3 N, vec3 albedo, vec3 view
                     pcf += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
                 }
             }
+
             shadow = pcf / 9.0;
         }
     }
@@ -91,7 +93,6 @@ vec3 evaluateLight(LightData light, vec3 fragPos, vec3 N, vec3 albedo, vec3 view
 }
 
 void main() {
-    vec3 fragPos = texture(gPosition, inUV).xyz;
     vec3 N = texture(gNormal, inUV).xyz;
     vec3 albedo = texture(gAlbedo, inUV).rgb;
 
@@ -99,6 +100,13 @@ void main() {
         outColor = vec4(albedo, 1.0);
         return;
     }
+
+    float depth = texture(gDepth, inUV).r;
+
+    vec4 ndc = vec4(inUV.x * 2.0 - 1.0, inUV.y * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = lightsUBO.invViewProj * ndc;
+
+    vec3 fragPos = worldPos.xyz / worldPos.w;
 
     N = normalize(N);
     vec3 viewDir = normalize(lightsUBO.viewPos.xyz - fragPos);

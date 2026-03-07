@@ -15,15 +15,13 @@ layout(push_constant) uniform PushConstants {
     int isUnlit;
 } pc;
 
-layout(location = 0) out vec3 outWorldPos;
-layout(location = 1) out vec3 outNormal;
-layout(location = 2) out vec2 outTexCoord;
-layout(location = 3) out vec4 outColor;
-layout(location = 4) out flat int outIsUnlit;
+layout(location = 0) out vec3 outNormal;
+layout(location = 1) out vec2 outTexCoord;
+layout(location = 2) out vec4 outColor;
+layout(location = 3) out flat int outIsUnlit;
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
-    outWorldPos = worldPos.xyz;
     outNormal = normalize(transpose(inverse(mat3(pc.model))) * inNormal);
     outTexCoord = inTexCoord;
     outColor = pc.color;
