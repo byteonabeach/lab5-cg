@@ -1,142 +1,207 @@
-#include "Window.h"
+#include "Engine.h"
+#include "RenderingSystem.h"
+#include "Light.h"
+#include "Camera.h"
 #include "Input.h"
-#include "Timer.h"
-#include "Renderer.h"
-#include "Mesh.h"
-#include <glm/gtc/matrix_transform.hpp>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
 #include <filesystem>
-#include <iostream>
 #include <string>
+#include <vector>
+#include <unordered_map>
+#include <algorithm>
 #include <cmath>
 
 namespace fs = std::filesystem;
 
-static std::string findOBJ() {
-    if (!fs::exists("assets")) return {};
-    for (auto& e : fs::directory_iterator("assets"))
-        if (e.path().extension() == ".obj")
-            return e.path().string();
+static std::string normSlashes(std::string p) {
+    for (char& c : p) if (c == '\\') c = '/';
+    return p;
+}
+
+static std::string findTexture(const std::string& name, const fs::path& baseDir) {
+    if (name.empty()) return {};
+    std::string n = normSlashes(name);
+    if (fs::exists(n)) return n;
+    if (fs::exists(baseDir / n)) return (baseDir / n).string();
+    auto fn = fs::path(n).filename();
+    if (fs::exists(baseDir / fn)) return (baseDir / fn).string();
+    if (fs::exists(baseDir / "textures" / fn)) return (baseDir / "textures" / fn).string();
     return {};
 }
 
-static std::string findTexture(const fs::path& dir) {
-    for (auto& e : fs::directory_iterator(dir)) {
-        auto ext = e.path().extension().string();
-        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg")
-            return e.path().string();
+static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool animatable = false) {
+    fs::path basePath = fs::path(objPath).parent_path();
+    tinyobj::ObjReaderConfig cfg;
+    cfg.mtl_search_path = basePath.string();
+    cfg.triangulate = true;
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error("tinyobj failed");
+    const auto& attrib = reader.GetAttrib();
+    const auto& shapes = reader.GetShapes();
+    const auto& materials = reader.GetMaterials();
+    TextureHandle whiteTex = engine.createWhiteTexture();
+    std::unordered_map<int, TextureHandle> texCache;
+    auto getMatTex = [&](int id) -> TextureHandle {
+        if (id < 0) return whiteTex;
+        auto it = texCache.find(id);
+        if (it != texCache.end()) return it->second;
+        auto path = findTexture(materials[id].diffuse_texname, basePath);
+        TextureHandle h = path.empty() ? whiteTex : engine.loadTexture(path);
+        texCache[id] = h;
+        return h;
+    };
+    SceneObject obj;
+    obj.animatable = animatable;
+    for (const auto& shape : shapes) {
+        std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches;
+        size_t off = 0;
+        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
+            int matID = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[f];
+            auto& [verts, inds] = batches[matID];
+            for (int v = 0; v < 3; ++v) {
+                tinyobj::index_t idx = shape.mesh.indices[off + v];
+                Vertex vert{};
+                vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
+                if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
+                if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]};
+                inds.push_back((uint32_t)verts.size());
+                verts.push_back(vert);
+            }
+            off += 3;
+        }
+        for (auto& [matID, pair] : batches) {
+            auto& [verts, inds] = pair;
+            if (verts.empty()) continue;
+            SubMesh sm;
+            sm.mesh = engine.createMesh(verts, inds);
+            sm.texture = getMatTex(matID);
+            obj.submeshes.push_back(sm);
+        }
     }
-    return {};
+    if (animatable) {
+        static const std::vector<std::string> imgExts = {".png",".jpg",".jpeg",".tga",".bmp",".PNG",".JPG",".TGA",".BMP"};
+        std::vector<TextureHandle> animTex;
+        for (const auto& e : fs::directory_iterator(basePath)) {
+            auto ext = e.path().extension().string();
+            if (std::find(imgExts.begin(), imgExts.end(), ext) != imgExts.end())
+                animTex.push_back(engine.loadTexture(e.path().string()));
+        }
+        std::sort(animTex.begin(), animTex.end(), [](const TextureHandle& a, const TextureHandle& b){ return a.id < b.id; });
+        if (!animTex.empty()) {
+            for (auto& sm : obj.submeshes) sm.animTextures = animTex;
+        }
+    }
+    return obj;
+}
+
+static MeshHandle createCubeMesh(Engine& engine) {
+    std::vector<Vertex> v = {
+        {{-1,-1,-1}, {0,0,-1}, {0,0}}, {{1,-1,-1}, {0,0,-1}, {1,0}}, {{1,1,-1}, {0,0,-1}, {1,1}}, {{-1,-1,-1}, {0,0,-1}, {0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}}, {{-1,1,-1}, {0,0,-1}, {0,1}},
+        {{-1,-1,1}, {0,0,1}, {0,0}}, {{1,-1,1}, {0,0,1}, {1,0}}, {{1,1,1}, {0,0,1}, {1,1}}, {{-1,-1,1}, {0,0,1}, {0,0}}, {{1,1,1}, {0,0,1}, {1,1}}, {{-1,1,1}, {0,0,1}, {0,1}},
+        {{-1,-1,-1}, {-1,0,0}, {0,0}}, {{-1,1,-1}, {-1,0,0}, {1,0}}, {{-1,1,1}, {-1,0,0}, {1,1}}, {{-1,-1,-1}, {-1,0,0}, {0,0}}, {{-1,1,1}, {-1,0,0}, {1,1}}, {{-1,-1,1}, {-1,0,0}, {0,1}},
+        {{1,-1,-1}, {1,0,0}, {0,0}}, {{1,1,-1}, {1,0,0}, {1,0}}, {{1,1,1}, {1,0,0}, {1,1}}, {{1,-1,-1}, {1,0,0}, {0,0}}, {{1,1,1}, {1,0,0}, {1,1}}, {{1,-1,1}, {1,0,0}, {0,1}},
+        {{-1,-1,-1}, {0,-1,0}, {0,0}}, {{1,-1,-1}, {0,-1,0}, {1,0}}, {{1,-1,1}, {0,-1,0}, {1,1}}, {{-1,-1,-1}, {0,-1,0}, {0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}}, {{-1,-1,1}, {0,-1,0}, {0,1}},
+        {{-1,1,-1}, {0,1,0}, {0,0}}, {{1,1,-1}, {0,1,0}, {1,0}}, {{1,1,1}, {0,1,0}, {1,1}}, {{-1,1,-1}, {0,1,0}, {0,0}}, {{1,1,1}, {0,1,0}, {1,1}}, {{-1,1,1}, {0,1,0}, {0,1}}
+    };
+    std::vector<uint32_t> i(36);
+    for(uint32_t j=0; j<36; ++j) i[j] = j;
+    return engine.createMesh(v, i);
 }
 
 int main() {
-    std::string objPath = findOBJ();
-    if (objPath.empty()) {
-        std::cerr << "no .obj found in assets/\n";
-        return 1;
+    glfwInit();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Deferred", nullptr, nullptr);
+
+    Input input;
+    input.init(window);
+
+    Engine engine;
+    RenderingSystem rs;
+    engine.init(window);
+    rs.init(engine);
+
+    MeshHandle cubeMesh = createCubeMesh(engine);
+    std::vector<SceneObject> objects;
+
+    try {
+        auto sponza = loadOBJ(engine, "assets/sponza/sponza.obj", false);
+        sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
+        objects.push_back(std::move(sponza));
+    } catch (...) {}
+
+    int animIdx = -1;
+    try {
+        auto m2 = loadOBJ(engine, "assets/model2/model.obj", true);
+        m2.transform = glm::mat4(1.0f);
+        animIdx = (int)objects.size();
+        objects.push_back(std::move(m2));
+    } catch (...) {}
+
+    for (int i=0; i<3; ++i) {
+        SceneObject cubeLight;
+        SubMesh sm;
+        sm.mesh = cubeMesh;
+        sm.texture = engine.createWhiteTexture();
+        cubeLight.submeshes.push_back(sm);
+        cubeLight.unlit = true;
+        objects.push_back(cubeLight);
     }
 
-    Window   window(1280, 720, "VulkanApp");
-    Input::get().init(window.handle());
+    Camera camera;
+    double lastTime = glfwGetTime();
 
-    Renderer renderer(window);
-    renderer.setLight({5, 8, 5}, {1, 1, 1}, 64.f);
-    renderer.setUV({0, 0}, {1, 1});
-
-    auto meshes = loadOBJ(objPath);
-    if (meshes.empty()) {
-        std::cerr << "failed to load " << objPath << "\n";
-        return 1;
-    }
-
-    std::string fallbackTex = findTexture(fs::path(objPath).parent_path());
-    if (!fallbackTex.empty())
-        std::cout << "fallback texture: " << fallbackTex << "\n";
-
-    for (auto& m : meshes) {
-        if (m.texturePath.empty() && !fallbackTex.empty())
-            m.texturePath = fallbackTex;
-        renderer.uploadMesh(m);
-    }
-
-    glm::vec3 pos   = {0, 1, 3};
-    float     yaw   = -90.f;
-    float     pitch = -10.f;
-    Timer     timer;
-
-    int uvMode   = 0;
-    int animMode = 0;
-
-    while (!window.shouldClose()) {
-        Input::get().beginFrame();
-        window.poll();
-        timer.tick();
-
-        float dt    = timer.dt();
-        float total = timer.total();
-
-        if (Input::get().isDown(GLFW_KEY_ESCAPE)) break;
-
-        if (Input::get().pressed(GLFW_KEY_1)) uvMode = 0;
-        if (Input::get().pressed(GLFW_KEY_2)) uvMode = 1;
-        if (Input::get().pressed(GLFW_KEY_3)) uvMode = 2;
-
-        if (Input::get().pressed(GLFW_KEY_4)) animMode = 0;
-        if (Input::get().pressed(GLFW_KEY_5)) animMode = 1;
-        if (Input::get().pressed(GLFW_KEY_6)) animMode = 2;
-        if (Input::get().pressed(GLFW_KEY_7)) animMode = 3;
-
-        switch (uvMode) {
-            case 0:
-                renderer.setUV({0.f, 0.f}, {1.f, 1.f});
-                break;
-            case 1:
-                renderer.setUV({total * 0.1f, total * 0.05f}, {1.f, 1.f});
-                break;
-            case 2:
-                renderer.setUV({0.f, 0.f}, {
-                    1.f + 0.5f * sinf(total),
-                    1.f + 0.5f * sinf(total)
-                });
-                break;
+    while (!glfwWindowShouldClose(window)) {
+        input.update();
+        if (input.wasResized()) {
+            int w=0, h=0;
+            glfwGetFramebufferSize(window, &w, &h);
+            if (w == 0 || h == 0) continue;
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
         }
 
-        renderer.setAnim(animMode, total);
+        double now = glfwGetTime();
+        float dt = (float)(now - lastTime);
+        lastTime = now;
+        camera.update(input, dt);
 
-        auto d = Input::get().delta();
-        yaw   += d.x * 0.12f;
-        pitch -= d.y * 0.12f;
-        pitch  = glm::clamp(pitch, -89.f, 89.f);
+        if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
 
-        glm::vec3 dir = glm::normalize(glm::vec3(
-            cos(glm::radians(yaw)) * cos(glm::radians(pitch)),
-            sin(glm::radians(pitch)),
-            sin(glm::radians(yaw)) * cos(glm::radians(pitch))
-        ));
-        glm::vec3 right = glm::normalize(glm::cross(dir, {0, 1, 0}));
+        std::vector<LightData> lights;
+        lights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
+        float px = 3.0f * (float)std::cos(now * 0.5);
+        float pz = 3.0f * (float)std::sin(now * 0.5);
+        lights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
+        lights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
+        rs.setLights(lights);
 
-        float speed = 5.f * dt;
-        if (Input::get().isDown(GLFW_KEY_LEFT_SHIFT)) speed *= 3.f;
-        if (Input::get().isDown(GLFW_KEY_W)) pos += dir   * speed;
-        if (Input::get().isDown(GLFW_KEY_S)) pos -= dir   * speed;
-        if (Input::get().isDown(GLFW_KEY_A)) pos -= right * speed;
-        if (Input::get().isDown(GLFW_KEY_D)) pos += right * speed;
-        if (Input::get().isDown(GLFW_KEY_SPACE))        pos.y += speed;
-        if (Input::get().isDown(GLFW_KEY_LEFT_CONTROL)) pos.y -= speed;
-
-        renderer.setCamera(pos, pos + dir, {0, 1, 0});
-
-        if (!renderer.beginFrame()) continue;
-        for (int i = 0; i < renderer.meshCount(); i++)
-            renderer.draw(i, glm::mat4(1.f));
-        renderer.endFrame();
-
-        static float t = 0; t += dt;
-        if (t > 0.5f) {
-            t = 0;
-            static const char* animNames[] = {"off", "wave", "pulse", "twist"};
-            window.setTitle("VulkanApp | " + std::to_string(timer.fps()) +
-                            " fps | UV:" + std::to_string(uvMode + 1) +
-                            " | Anim:" + animNames[animMode]);
+        for(size_t i=0; i<lights.size(); ++i) {
+            size_t objIdx = objects.size() - 3 + i;
+            if (objIdx < objects.size()) {
+                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(lights[i].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+                objects[objIdx].unlitColor = lights[i].color * 3.0f;
+            }
         }
+
+        FrameContext ctx = engine.beginFrame();
+        if (!ctx.valid) {
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
+            continue;
+        }
+
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
+        engine.endFrame(ctx);
     }
+
+    rs.cleanup(engine);
+    engine.cleanup();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
 }
