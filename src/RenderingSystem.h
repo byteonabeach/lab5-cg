@@ -12,6 +12,7 @@ public:
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
+
     void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<SceneObject>& objects, Engine& engine, float time);
 
 private:

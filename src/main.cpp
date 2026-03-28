@@ -15,6 +15,13 @@
 
 namespace fs = std::filesystem;
 
+struct FallingFlashlight {
+    glm::vec3 position;
+    glm::vec3 velocity;
+    glm::vec3 color;
+    SceneObject object;
+};
+
 static std::string normSlashes(std::string p) {
     for (char& c : p) if (c == '\\') c = '/';
     return p;
@@ -114,7 +121,6 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
                     tDiff = engine.loadTexture(pDiff);
                     std::string lowerName = pDiff;
                     for(auto& c : lowerName) c = tolower(c);
-                    // Определяем занавески по имени материала
                     if (lowerName.find("curtain") != std::string::npos || lowerName.find("fabric") != std::string::npos) {
                         sm.isCurtain = true;
                     }
@@ -171,8 +177,6 @@ int main() {
     MeshHandle cubeMesh = createCubeMesh(engine);
     std::vector<SceneObject> objects;
 
-<<<<<<< HEAD
-<<<<<<< HEAD
     std::vector<FallingFlashlight> droppedLights;
     bool fPressedLastFrame = false;
 
@@ -180,10 +184,6 @@ int main() {
     const float FLOOR_Y = 0.05f;
 
     std::cout << "Loading Sponza..." << std::endl;
-=======
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-=======
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
     try {
         auto sponza = loadOBJ(engine, "assets/sponza.obj", false);
         sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
@@ -227,8 +227,6 @@ int main() {
         lastTime = now;
         camera.update(input, dt);
 
-<<<<<<< HEAD
-<<<<<<< HEAD
         bool fIsDown = input.isKeyDown(GLFW_KEY_F);
         if (fIsDown && !fPressedLastFrame) {
             FallingFlashlight fl;
@@ -263,13 +261,13 @@ int main() {
         }
 
         std::vector<LightData> allLights;
-        allLights.push_back(Light::makeDirectional({0.2f, -1.0f, 0.1f}, {1.0f, 0.95f, 0.85f}, 2.5f, true, 0));
+        allLights.push_back(Light::makeDirectional({-0.2f, -1.0f, 0.1f}, {1.0f, 0.95f, 0.9f}, 3.0f, true, 0));
 
         float px = 8.0f * (float)std::cos(now * 0.5);
         float pz = 3.0f * (float)std::sin(now * 0.5);
-        allLights.push_back(Light::makePoint({px, 1.5f, pz}, {0.4f, 0.6f, 1.0f}, 2.0f, 15.0f));
+        allLights.push_back(Light::makePoint({px, 1.5f, pz}, {0.5f, 0.7f, 1.0f}, 2.0f, 15.0f));
 
-        allLights.push_back(Light::makeSpot({0.0f, 6.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 35.0f, {1.0f, 0.8f, 0.6f}, 5.0f, 20.0f, true, 1));
+        allLights.push_back(Light::makeSpot({0.0f, 8.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 35.0f, {1.0f, 0.8f, 0.6f}, 5.0f, 25.0f, true, 1));
 
         for (const auto& fl : droppedLights) {
             allLights.push_back(Light::makePoint(fl.position, fl.color, 4.0f, 10.0f));
@@ -291,31 +289,6 @@ int main() {
             frameObjects.push_back(fl.object);
         }
 
-=======
-=======
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-        if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
-
-        std::vector<LightData> lights;
-        lights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
-        float px = 3.0f * (float)std::cos(now * 0.5);
-        float pz = 3.0f * (float)std::sin(now * 0.5);
-        lights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
-        lights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
-        rs.setLights(lights);
-
-        for(size_t i=0; i<lights.size(); ++i) {
-            size_t objIdx = objects.size() - 3 + i;
-            if (objIdx < objects.size()) {
-                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(lights[i].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
-                objects[objIdx].unlitColor = lights[i].color * 3.0f;
-            }
-        }
-
-<<<<<<< HEAD
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-=======
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
         FrameContext ctx = engine.beginFrame();
         if (!ctx.valid) {
             engine.recreateSwapchain();
@@ -324,16 +297,7 @@ int main() {
             continue;
         }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-        // Передаем (float)now для времени
         rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine, (float)now);
-=======
-        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-=======
-        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
         engine.endFrame(ctx);
     }
 

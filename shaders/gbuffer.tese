@@ -1,4 +1,3 @@
-//filename: ./shaders/gbuffer.tese
 #version 450
 layout(triangles, equal_spacing, ccw) in;
 
@@ -46,16 +45,12 @@ void main() {
     vec3 worldPos = interpolate3D(inWorldPos[0], inWorldPos[1], inWorldPos[2]);
 
     if (pc.isCurtain != 0) {
-        // Занавески: симулируем ветер
-        // UV координата V=1 это верх занавески, V=0 это низ, где мы хотим максимум движения.
-        // Используем квадрат (1.0 - V), чтобы закрепить верхний край жестко за карниз.
         float stiff = (1.0 - outTexCoord.y) * (1.0 - outTexCoord.y);
 
         float t = pc.time;
-        // Генерируем 3D смещение
         float waveX = sin(t * 1.5 + worldPos.y * 3.0) * 0.12;
         float waveZ = cos(t * 1.2 + worldPos.x * 2.0) * 0.08;
-        float waveN = sin(t * 2.0 + worldPos.x * 4.0 + worldPos.z * 4.0) * 0.05; // Рябь по нормали
+        float waveN = sin(t * 2.0 + worldPos.x * 4.0 + worldPos.z * 4.0) * 0.05;
 
         vec3 offset = vec3(waveX, 0.0, waveZ) + (outNormal * waveN);
         worldPos += offset * stiff;

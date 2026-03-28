@@ -17,32 +17,15 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec3 outWorldPos;
 layout(location = 1) out vec3 outNormal;
 layout(location = 2) out vec2 outTexCoord;
-<<<<<<< HEAD
-<<<<<<< HEAD
 layout(location = 3) out vec3 outTangent;
-=======
-layout(location = 3) out vec4 outColor;
-layout(location = 4) out flat int outIsUnlit;
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-=======
-layout(location = 3) out vec4 outColor;
-layout(location = 4) out flat int outIsUnlit;
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
     outWorldPos = worldPos.xyz;
-<<<<<<< HEAD
-<<<<<<< HEAD
 
     mat3 normalMat = transpose(inverse(mat3(pc.model)));
     outNormal = normalize(normalMat * inNormal);
     outTangent = normalize(normalMat * inTangent);
 
-=======
-=======
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
-    outNormal = normalize(transpose(inverse(mat3(pc.model))) * inNormal);
->>>>>>> parent of ad8e0d8 (SPONZA!!!)
     outTexCoord = inTexCoord;
 }

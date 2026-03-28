@@ -1,5 +1,4 @@
 #pragma once
-
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <array>
@@ -8,8 +7,7 @@ class Engine;
 
 class GBuffer {
 public:
-    static constexpr int NUM_ATTACHMENTS = 3;
-    static constexpr VkFormat FORMAT_POSITION = VK_FORMAT_R32G32B32A32_SFLOAT;
+    static constexpr int NUM_ATTACHMENTS = 2;
     static constexpr VkFormat FORMAT_NORMAL = VK_FORMAT_R16G16B16A16_SFLOAT;
     static constexpr VkFormat FORMAT_ALBEDO = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -19,9 +17,11 @@ public:
 
     VkRenderPass getRenderPass() const { return renderPass; }
     VkFramebuffer getFramebuffer() const { return framebuffer; }
-    VkImageView getPositionView() const { return views[0]; }
-    VkImageView getNormalView() const { return views[1]; }
-    VkImageView getAlbedoView() const { return views[2]; }
+
+    VkImageView getNormalView() const { return views[0]; }
+    VkImageView getAlbedoView() const { return views[1]; }
+    VkImageView getDepthView()  const { return depthView; }
+
     VkSampler getSampler() const { return sampler; }
     VkExtent2D getExtent() const { return extent; }
 

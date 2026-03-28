@@ -41,7 +41,7 @@ struct SubMesh {
     VkDescriptorSet matSet = VK_NULL_HANDLE;
     std::vector<TextureHandle> animTextures;
     float dispScale = 0.0f;
-    bool isCurtain = false; // Флаг для вертексной анимации ткани
+    bool isCurtain = false;
 };
 
 struct SceneObject {
