@@ -10,17 +10,10 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <algorithm>
 #include <cmath>
+#include <iostream>
 
 namespace fs = std::filesystem;
-
-struct FallingFlashlight {
-    glm::vec3 position;
-    glm::vec3 velocity;
-    glm::vec3 color;
-    SceneObject object;
-};
 
 static std::string normSlashes(std::string p) {
     for (char& c : p) if (c == '\\') c = '/';
@@ -44,21 +37,16 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
     cfg.mtl_search_path = basePath.string();
     cfg.triangulate = true;
     tinyobj::ObjReader reader;
-    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error("tinyobj failed");
+    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error("tinyobj failed: " + reader.Error());
+
     const auto& attrib = reader.GetAttrib();
     const auto& shapes = reader.GetShapes();
     const auto& materials = reader.GetMaterials();
+
     TextureHandle whiteTex = engine.createWhiteTexture();
-    std::unordered_map<int, TextureHandle> texCache;
-    auto getMatTex = [&](int id) -> TextureHandle {
-        if (id < 0) return whiteTex;
-        auto it = texCache.find(id);
-        if (it != texCache.end()) return it->second;
-        auto path = findTexture(materials[id].diffuse_texname, basePath);
-        TextureHandle h = path.empty() ? whiteTex : engine.loadTexture(path);
-        texCache[id] = h;
-        return h;
-    };
+    TextureHandle defNormTex = engine.createDefaultNormalTexture();
+    TextureHandle blackTex = engine.createBlackTexture();
+
     SceneObject obj;
     obj.animatable = animatable;
     for (const auto& shape : shapes) {
@@ -81,23 +69,73 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
         for (auto& [matID, pair] : batches) {
             auto& [verts, inds] = pair;
             if (verts.empty()) continue;
+
+            for (size_t i = 0; i < inds.size(); i += 3) {
+                Vertex& v0 = verts[inds[i]];
+                Vertex& v1 = verts[inds[i+1]];
+                Vertex& v2 = verts[inds[i+2]];
+
+                glm::vec3 e1 = v1.pos - v0.pos;
+                glm::vec3 e2 = v2.pos - v0.pos;
+                glm::vec2 duv1 = v1.texCoord - v0.texCoord;
+                glm::vec2 duv2 = v2.texCoord - v0.texCoord;
+
+                float f = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y + 0.0001f);
+                glm::vec3 tangent;
+                tangent.x = f * (duv2.y * e1.x - duv1.y * e2.x);
+                tangent.y = f * (duv2.y * e1.y - duv1.y * e2.y);
+                tangent.z = f * (duv2.y * e1.z - duv1.y * e2.z);
+
+                if(glm::length(tangent) > 0.0001f) {
+                    tangent = glm::normalize(tangent);
+                } else {
+                    tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+                }
+
+                v0.tangent = v1.tangent = v2.tangent = tangent;
+            }
+
             SubMesh sm;
             sm.mesh = engine.createMesh(verts, inds);
-            sm.texture = getMatTex(matID);
+
+            TextureHandle tDiff = whiteTex;
+            TextureHandle tNorm = defNormTex;
+            TextureHandle tDisp = blackTex;
+            sm.dispScale = 0.0f;
+            sm.isCurtain = false;
+
+            if (matID >= 0) {
+                auto pDiff = findTexture(materials[matID].diffuse_texname, basePath);
+                auto pNorm = findTexture(materials[matID].bump_texname, basePath);
+                if (pNorm.empty()) pNorm = findTexture(materials[matID].normal_texname, basePath);
+                auto pDisp = findTexture(materials[matID].displacement_texname, basePath);
+
+                if (!pDiff.empty()) {
+                    tDiff = engine.loadTexture(pDiff);
+                    std::string lowerName = pDiff;
+                    for(auto& c : lowerName) c = tolower(c);
+                    // Определяем занавески по имени материала
+                    if (lowerName.find("curtain") != std::string::npos || lowerName.find("fabric") != std::string::npos) {
+                        sm.isCurtain = true;
+                    }
+                }
+                if (!pNorm.empty()) tNorm = engine.loadTexture(pNorm);
+
+                if (!pDisp.empty()) {
+                    tDisp = engine.loadTexture(pDisp);
+                    sm.dispScale = 0.05f;
+                } else if (pNorm.find("displace") != std::string::npos && pDisp.empty()) {
+                    tDisp = engine.loadTexture(pNorm);
+                    sm.dispScale = 0.05f;
+                }
+            }
+
+            sm.texture = tDiff;
+            sm.normalMap = tNorm;
+            sm.dispMap = tDisp;
+            sm.matSet = engine.createMaterialSet(tDiff, tNorm, tDisp);
+
             obj.submeshes.push_back(sm);
-        }
-    }
-    if (animatable) {
-        static const std::vector<std::string> imgExts = {".png",".jpg",".jpeg",".tga",".bmp",".PNG",".JPG",".TGA",".BMP"};
-        std::vector<TextureHandle> animTex;
-        for (const auto& e : fs::directory_iterator(basePath)) {
-            auto ext = e.path().extension().string();
-            if (std::find(imgExts.begin(), imgExts.end(), ext) != imgExts.end())
-                animTex.push_back(engine.loadTexture(e.path().string()));
-        }
-        std::sort(animTex.begin(), animTex.end(), [](const TextureHandle& a, const TextureHandle& b){ return a.id < b.id; });
-        if (!animTex.empty()) {
-            for (auto& sm : obj.submeshes) sm.animTextures = animTex;
         }
     }
     return obj;
@@ -105,12 +143,12 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
 
 static MeshHandle createCubeMesh(Engine& engine) {
     std::vector<Vertex> v = {
-        {{-1,-1,-1}, {0,0,-1}, {0,0}}, {{1,-1,-1}, {0,0,-1}, {1,0}}, {{1,1,-1}, {0,0,-1}, {1,1}}, {{-1,-1,-1}, {0,0,-1}, {0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}}, {{-1,1,-1}, {0,0,-1}, {0,1}},
-        {{-1,-1,1}, {0,0,1}, {0,0}}, {{1,-1,1}, {0,0,1}, {1,0}}, {{1,1,1}, {0,0,1}, {1,1}}, {{-1,-1,1}, {0,0,1}, {0,0}}, {{1,1,1}, {0,0,1}, {1,1}}, {{-1,1,1}, {0,0,1}, {0,1}},
-        {{-1,-1,-1}, {-1,0,0}, {0,0}}, {{-1,1,-1}, {-1,0,0}, {1,0}}, {{-1,1,1}, {-1,0,0}, {1,1}}, {{-1,-1,-1}, {-1,0,0}, {0,0}}, {{-1,1,1}, {-1,0,0}, {1,1}}, {{-1,-1,1}, {-1,0,0}, {0,1}},
-        {{1,-1,-1}, {1,0,0}, {0,0}}, {{1,1,-1}, {1,0,0}, {1,0}}, {{1,1,1}, {1,0,0}, {1,1}}, {{1,-1,-1}, {1,0,0}, {0,0}}, {{1,1,1}, {1,0,0}, {1,1}}, {{1,-1,1}, {1,0,0}, {0,1}},
-        {{-1,-1,-1}, {0,-1,0}, {0,0}}, {{1,-1,-1}, {0,-1,0}, {1,0}}, {{1,-1,1}, {0,-1,0}, {1,1}}, {{-1,-1,-1}, {0,-1,0}, {0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}}, {{-1,-1,1}, {0,-1,0}, {0,1}},
-        {{-1,1,-1}, {0,1,0}, {0,0}}, {{1,1,-1}, {0,1,0}, {1,0}}, {{1,1,1}, {0,1,0}, {1,1}}, {{-1,1,-1}, {0,1,0}, {0,0}}, {{1,1,1}, {0,1,0}, {1,1}}, {{-1,1,1}, {0,1,0}, {0,1}}
+        {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,-1,-1}, {0,0,-1}, {1,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,0,-1}, {0,1}, {1,0,0}},
+        {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,-1,1}, {0,0,1}, {1,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,0,1}, {0,1}, {1,0,0}},
+        {{-1,-1,-1}, {-1,0,0}, {0,0}, {0,0,1}}, {{-1,1,-1}, {-1,0,0}, {1,0}, {0,0,1}}, {{-1,1,1}, {-1,0,0}, {1,1}, {0,0,1}}, {{-1,-1,-1}, {-1,0,0}, {0,0}, {0,0,1}}, {{-1,1,1}, {-1,0,0}, {1,1}, {0,0,1}}, {{-1,-1,1}, {-1,0,0}, {0,1}, {0,0,1}},
+        {{1,-1,-1}, {1,0,0}, {0,0}, {0,0,-1}}, {{1,1,-1}, {1,0,0}, {1,0}, {0,0,-1}}, {{1,1,1}, {1,0,0}, {1,1}, {0,0,-1}}, {{1,-1,-1}, {1,0,0}, {0,0}, {0,0,-1}}, {{1,1,1}, {1,0,0}, {1,1}, {0,0,-1}}, {{1,-1,1}, {1,0,0}, {0,1}, {0,0,-1}},
+        {{-1,-1,-1}, {0,-1,0}, {0,0}, {1,0,0}}, {{1,-1,-1}, {0,-1,0}, {1,0}, {1,0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}, {1,0,0}}, {{-1,-1,-1}, {0,-1,0}, {0,0}, {1,0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}, {1,0,0}}, {{-1,-1,1}, {0,-1,0}, {0,1}, {1,0,0}},
+        {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,1,0}, {1,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,1,0}, {0,1}, {1,0,0}}
     };
     std::vector<uint32_t> i(36);
     for(uint32_t j=0; j<36; ++j) i[j] = j;
@@ -120,7 +158,7 @@ static MeshHandle createCubeMesh(Engine& engine) {
 int main() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Deferred", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Sponza Tessellation", nullptr, nullptr);
 
     Input input;
     input.init(window);
@@ -133,130 +171,158 @@ int main() {
     MeshHandle cubeMesh = createCubeMesh(engine);
     std::vector<SceneObject> objects;
 
+<<<<<<< HEAD
     std::vector<FallingFlashlight> droppedLights;
     bool fPressedLastFrame = false;
 
     const float GRAVITY = -9.81f;
     const float FLOOR_Y = 0.05f;
 
-
+    std::cout << "Loading Sponza..." << std::endl;
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
     try {
-        auto sponza = loadOBJ(engine, "assets/sponza/sponza.obj", false);
+        auto sponza = loadOBJ(engine, "assets/sponza.obj", false);
         sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
         objects.push_back(std::move(sponza));
-    } catch (...) {}
-
-    int animIdx = -1;
-    try {
-        auto m2 = loadOBJ(engine, "assets/model2/model.obj", true);
-        m2.transform = glm::mat4(1.0f);
-        animIdx = (int)objects.size();
-        objects.push_back(std::move(m2));
-    } catch (...) {}
+        std::cout << "Sponza loaded successfully!" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading model: " << e.what() << std::endl;
+    }
 
     for (int i=0; i<3; ++i) {
         SceneObject cubeLight;
         SubMesh sm;
         sm.mesh = cubeMesh;
         sm.texture = engine.createWhiteTexture();
+        sm.normalMap = engine.createDefaultNormalTexture();
+        sm.dispMap = engine.createBlackTexture();
+        sm.dispScale = 0.0f;
+        sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
         cubeLight.submeshes.push_back(sm);
         cubeLight.unlit = true;
         objects.push_back(cubeLight);
     }
 
     Camera camera;
+    camera.position = glm::vec3(0.0f, 1.5f, 0.0f);
     double lastTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
-            input.update();
-            if (input.wasResized()) {
-                int w=0, h=0;
-                glfwGetFramebufferSize(window, &w, &h);
-                if (w == 0 || h == 0) continue;
-                engine.recreateSwapchain();
-                rs.onResize(engine);
-                input.clearResized();
-            }
-
-            double now = glfwGetTime();
-            float dt = (float)(now - lastTime);
-            lastTime = now;
-            camera.update(input, dt);
-
-            // 1. ЛОГИКА АНИМАЦИИ И СПАВНА ФОНАРИКОВ
-            if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
-
-            bool fIsDown = input.isKeyDown(GLFW_KEY_F);
-            if (fIsDown && !fPressedLastFrame) {
-                FallingFlashlight fl;
-                fl.position = camera.position;
-                fl.velocity = camera.front() * 10.0f;
-                fl.color = glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f) * 2.0f + 0.5f;
-
-                SubMesh sm;
-                sm.mesh = cubeMesh;
-                sm.texture = engine.createWhiteTexture();
-                fl.object.submeshes.push_back(sm);
-                fl.object.unlit = true;
-                fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
-                droppedLights.push_back(fl);
-            }
-            fPressedLastFrame = fIsDown;
-
-            // 2. ФИЗИКА ФОНАРИКОВ
-            for (auto& fl : droppedLights) {
-                if (fl.position.y > FLOOR_Y) {
-                    fl.velocity.y += GRAVITY * dt;
-                    fl.position += fl.velocity * dt;
-                } else {
-                    fl.position.y = FLOOR_Y;
-                    fl.velocity = glm::vec3(0.0f);
-                }
-                fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
-            }
-
-            // 3. ПОДГОТОВКА ВСЕХ ИСТОЧНИКОВ СВЕТА (Static + Dropped)
-            std::vector<LightData> allLights;
-            // Основные источники
-            allLights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
-            float px = 3.0f * (float)std::cos(now * 0.5);
-            float pz = 3.0f * (float)std::sin(now * 0.5);
-            allLights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
-            allLights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
-
-            // Добавляем свет от фонариков
-            for (const auto& fl : droppedLights) {
-                allLights.push_back(Light::makePoint(fl.position, fl.color, 8.0f, 12.0f));
-            }
-
-            if (allLights.size() > 64) allLights.resize(64);
-            rs.setLights(allLights);
-
-            // Обновляем визуальные кубики для основных лампочек (последние 3 объекта в векторе objects)
-            for(size_t i=0; i<3; ++i) {
-                size_t objIdx = objects.size() - 3 + i;
-                if (objIdx < objects.size() && i + 1 < allLights.size()) { // i+1 так как 0-й свет это солнце
-                    objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(allLights[i+1].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
-                    objects[objIdx].unlitColor = allLights[i+1].color * 3.0f;
-                }
-            }
-
-            std::vector<SceneObject> frameObjects = objects;
-            for (const auto& fl : droppedLights) {
-                frameObjects.push_back(fl.object);
-            }
-
-            FrameContext ctx = engine.beginFrame();
-            if (!ctx.valid) {
-                engine.recreateSwapchain();
-                rs.onResize(engine);
-                input.clearResized();
-                continue;
-            }
-
-            rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine);
-            engine.endFrame(ctx);
+        input.update();
+        if (input.wasResized()) {
+            int w=0, h=0;
+            glfwGetFramebufferSize(window, &w, &h);
+            if (w == 0 || h == 0) continue;
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
         }
+
+        double now = glfwGetTime();
+        float dt = (float)(now - lastTime);
+        lastTime = now;
+        camera.update(input, dt);
+
+<<<<<<< HEAD
+        bool fIsDown = input.isKeyDown(GLFW_KEY_F);
+        if (fIsDown && !fPressedLastFrame) {
+            FallingFlashlight fl;
+            fl.position = camera.position;
+            fl.velocity = camera.front() * 10.0f;
+            fl.color = glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f) * 2.0f + 0.5f;
+
+            SubMesh sm;
+            sm.mesh = cubeMesh;
+            sm.texture = engine.createWhiteTexture();
+            sm.normalMap = engine.createDefaultNormalTexture();
+            sm.dispMap = engine.createBlackTexture();
+            sm.dispScale = 0.0f;
+            sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
+
+            fl.object.submeshes.push_back(sm);
+            fl.object.unlit = true;
+            fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
+            droppedLights.push_back(fl);
+        }
+        fPressedLastFrame = fIsDown;
+
+        for (auto& fl : droppedLights) {
+            if (fl.position.y > FLOOR_Y) {
+                fl.velocity.y += GRAVITY * dt;
+                fl.position += fl.velocity * dt;
+            } else {
+                fl.position.y = FLOOR_Y;
+                fl.velocity = glm::vec3(0.0f);
+            }
+            fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+        }
+
+        std::vector<LightData> allLights;
+        allLights.push_back(Light::makeDirectional({0.2f, -1.0f, 0.1f}, {1.0f, 0.95f, 0.85f}, 2.5f, true, 0));
+
+        float px = 8.0f * (float)std::cos(now * 0.5);
+        float pz = 3.0f * (float)std::sin(now * 0.5);
+        allLights.push_back(Light::makePoint({px, 1.5f, pz}, {0.4f, 0.6f, 1.0f}, 2.0f, 15.0f));
+
+        allLights.push_back(Light::makeSpot({0.0f, 6.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 35.0f, {1.0f, 0.8f, 0.6f}, 5.0f, 20.0f, true, 1));
+
+        for (const auto& fl : droppedLights) {
+            allLights.push_back(Light::makePoint(fl.position, fl.color, 4.0f, 10.0f));
+        }
+
+        if (allLights.size() > 64) allLights.resize(64);
+        rs.setLights(allLights);
+
+        for(size_t i=0; i<3; ++i) {
+            size_t objIdx = objects.size() - 3 + i;
+            if (objIdx < objects.size() && i + 1 < allLights.size()) {
+                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(allLights[i+1].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+                objects[objIdx].unlitColor = allLights[i+1].color * 3.0f;
+            }
+        }
+
+        std::vector<SceneObject> frameObjects = objects;
+        for (const auto& fl : droppedLights) {
+            frameObjects.push_back(fl.object);
+        }
+
+=======
+        if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
+
+        std::vector<LightData> lights;
+        lights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
+        float px = 3.0f * (float)std::cos(now * 0.5);
+        float pz = 3.0f * (float)std::sin(now * 0.5);
+        lights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
+        lights.push_back(Light::makeSpot({0.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
+        rs.setLights(lights);
+
+        for(size_t i=0; i<lights.size(); ++i) {
+            size_t objIdx = objects.size() - 3 + i;
+            if (objIdx < objects.size()) {
+                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(lights[i].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+                objects[objIdx].unlitColor = lights[i].color * 3.0f;
+            }
+        }
+
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
+        FrameContext ctx = engine.beginFrame();
+        if (!ctx.valid) {
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
+            continue;
+        }
+
+<<<<<<< HEAD
+        // Передаем (float)now для времени
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine, (float)now);
+=======
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
+        engine.endFrame(ctx);
+    }
 
     rs.cleanup(engine);
     engine.cleanup();

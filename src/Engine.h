@@ -11,6 +11,7 @@ struct Vertex {
     glm::vec3 pos;
     glm::vec3 normal;
     glm::vec2 texCoord;
+    glm::vec3 tangent;
 
     static VkVertexInputBindingDescription getBindingDesc() {
         VkVertexInputBindingDescription d{};
@@ -19,11 +20,12 @@ struct Vertex {
         d.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
         return d;
     }
-    static std::array<VkVertexInputAttributeDescription, 3> getAttrDescs() {
-        std::array<VkVertexInputAttributeDescription, 3> a{};
+    static std::array<VkVertexInputAttributeDescription, 4> getAttrDescs() {
+        std::array<VkVertexInputAttributeDescription, 4> a{};
         a[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, pos)};
         a[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)};
         a[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, texCoord)};
+        a[3] = {3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, tangent)};
         return a;
     }
 };
@@ -34,7 +36,12 @@ struct MeshHandle { int id = -1; bool valid() const { return id >= 0; } };
 struct SubMesh {
     MeshHandle mesh;
     TextureHandle texture;
+    TextureHandle normalMap;
+    TextureHandle dispMap;
+    VkDescriptorSet matSet = VK_NULL_HANDLE;
     std::vector<TextureHandle> animTextures;
+    float dispScale = 0.0f;
+    bool isCurtain = false; // Флаг для вертексной анимации ткани
 };
 
 struct SceneObject {
@@ -48,9 +55,11 @@ struct SceneObject {
     void nextAnimFrame() {
         if (!animatable) return;
         ++animFrame;
-        for (auto& sm : submeshes)
-            if (!sm.animTextures.empty())
+        for (auto& sm : submeshes) {
+            if (!sm.animTextures.empty()) {
                 sm.texture = sm.animTextures[animFrame % (int)sm.animTextures.size()];
+            }
+        }
     }
 };
 
@@ -73,6 +82,10 @@ public:
 
     TextureHandle loadTexture(const std::string& path);
     TextureHandle createWhiteTexture();
+    TextureHandle createDefaultNormalTexture();
+    TextureHandle createBlackTexture();
+
+    VkDescriptorSet createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp);
     MeshHandle createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices);
 
     VkDevice getDevice() const { return device; }
@@ -87,7 +100,6 @@ public:
     size_t getSwapImageCount() const { return swapImages.size(); }
 
     VkDescriptorSetLayout getMaterialLayout() const { return materialLayout; }
-    VkDescriptorSet getTextureSet(TextureHandle h) const { return (h.valid()) ? textures[h.id].set : VK_NULL_HANDLE; }
 
     void bindAndDrawMesh_(VkCommandBuffer cmd, MeshHandle h) const {
         if (!h.valid()) return;
@@ -145,7 +157,6 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkSampler sampler = VK_NULL_HANDLE;
-        VkDescriptorSet set = VK_NULL_HANDLE;
     };
     struct MeshRes {
         VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
@@ -154,7 +165,10 @@ private:
     };
     std::vector<TextureRes> textures;
     std::vector<MeshRes> meshes;
+
     TextureHandle cachedWhiteTex;
+    TextureHandle cachedDefNormTex;
+    TextureHandle cachedBlackTex;
 
     VkDescriptorPool materialPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialLayout = VK_NULL_HANDLE;

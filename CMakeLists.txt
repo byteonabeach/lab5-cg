@@ -62,6 +62,8 @@ file(MAKE_DIRECTORY ${SHADER_OUT})
 
 set(SHADERS
     gbuffer.vert
+    gbuffer.tesc
+    gbuffer.tese
     gbuffer.frag
     lighting.vert
     lighting.frag

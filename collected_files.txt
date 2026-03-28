@@ -1,0 +1,3778 @@
+//filename: ./shaders/gbuffer.frag
+#version 450
+
+layout(location = 0) in vec3 inWorldPos;
+layout(location = 1) in vec3 inNormal;
+layout(location = 2) in vec2 inTexCoord;
+layout(location = 3) in vec3 inTangent;
+layout(location = 4) in vec4 inColor;
+layout(location = 5) in flat int inIsUnlit;
+
+layout(set = 1, binding = 0) uniform sampler2D diffuseTex;
+layout(set = 1, binding = 1) uniform sampler2D normalTex;
+
+layout(location = 0) out vec4 gNormal;
+layout(location = 1) out vec4 gAlbedo;
+
+void main() {
+    if (inIsUnlit != 0) {
+        gNormal = vec4(0.0);
+        gAlbedo = inColor;
+        return;
+    }
+
+    vec4 diffuse = texture(diffuseTex, inTexCoord);
+    if (diffuse.a < 0.1) discard;
+
+    vec3 N = normalize(inNormal);
+    vec3 T = normalize(inTangent);
+
+    T = normalize(T - dot(T, N) * N);
+    vec3 B = cross(N, T);
+    mat3 TBN = mat3(T, B, N);
+
+    vec3 tangentNormal = texture(normalTex, inTexCoord).xyz * 2.0 - 1.0;
+    vec3 finalNormal = normalize(TBN * tangentNormal);
+
+    gNormal = vec4(finalNormal, 0.0);
+    gAlbedo = vec4(diffuse.rgb, 1.0);
+}
+
+//filename: ./shaders/gbuffer.vert
+#version 450
+
+layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inNormal;
+layout(location = 2) in vec2 inTexCoord;
+layout(location = 3) in vec3 inTangent;
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    vec4 color;
+    int isUnlit;
+    float dispScale;
+} pc;
+
+layout(location = 0) out vec3 outWorldPos;
+layout(location = 1) out vec3 outNormal;
+layout(location = 2) out vec2 outTexCoord;
+layout(location = 3) out vec3 outTangent;
+
+void main() {
+    vec4 worldPos = pc.model * vec4(inPosition, 1.0);
+    outWorldPos = worldPos.xyz;
+
+    mat3 normalMat = transpose(inverse(mat3(pc.model)));
+    outNormal = normalize(normalMat * inNormal);
+    outTangent = normalize(normalMat * inTangent);
+
+    outTexCoord = inTexCoord;
+}
+
+//filename: ./shaders/lighting.frag
+#version 450
+
+layout(location = 0) in vec2 inUV;
+
+layout(set = 0, binding = 0) uniform sampler2D gNormal;
+layout(set = 0, binding = 1) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gDepth;
+layout(set = 0, binding = 4) uniform sampler2DArray shadowMap;
+
+struct LightData {
+    vec4 position;
+    vec4 direction;
+    vec4 color;
+    vec4 params;
+    vec4 params2;
+    mat4 lightSpace;
+};
+
+layout(set = 0, binding = 3) uniform LightsUBO {
+    vec4 viewPos;
+    vec4 ambientColor;
+    ivec4 countPad;
+    mat4 invViewProj;
+    LightData lights[64];
+} lightsUBO;
+
+layout(location = 0) out vec4 outColor;
+
+float calcAttenuation(float dist, float range) {
+    float x = clamp(dist / range, 0.0, 1.0);
+    return (1.0 - x) * (1.0 - x);
+}
+
+vec3 evaluateLight(LightData light, vec3 fragPos, vec3 N, vec3 albedo, vec3 viewDir) {
+    int type = int(light.params.x);
+    vec3 lightDir;
+    float atten = 1.0;
+
+    if (type == 0) {
+        lightDir = normalize(-light.direction.xyz);
+    } else if (type == 1) {
+        vec3 toLight = light.position.xyz - fragPos;
+        lightDir = normalize(toLight);
+        atten = calcAttenuation(length(toLight), light.params.w);
+    } else {
+        vec3 toLight = light.position.xyz - fragPos;
+        lightDir = normalize(toLight);
+        atten = calcAttenuation(length(toLight), light.params.w);
+        float cosAngle = dot(lightDir, normalize(-light.direction.xyz));
+        float spotFactor = clamp((cosAngle - light.params.z) / max(light.params.y - light.params.z, 1e-5), 0.0, 1.0);
+        atten *= spotFactor * spotFactor * (3.0 - 2.0 * spotFactor);
+    }
+
+    if (atten < 1e-5) return vec3(0.0);
+
+    float shadow = 0.0;
+    if (light.params2.x > 0.5) {
+        vec4 fragPosLS = light.lightSpace * vec4(fragPos, 1.0);
+        vec3 projCoords = fragPosLS.xyz / fragPosLS.w;
+        projCoords.xy = projCoords.xy * 0.5 + 0.5;
+
+        if (projCoords.z > 0.0 && projCoords.z < 1.0 &&
+                projCoords.x > 0.0 && projCoords.x < 1.0 &&
+                projCoords.y > 0.0 && projCoords.y < 1.0) {
+            float currentDepth = projCoords.z;
+            float bias = max(0.005 * (1.0 - dot(N, lightDir)), 0.001);
+            vec2 texelSize = 1.0 / vec2(2048.0);
+            float pcf = 0.0;
+
+            for (int x = -1; x <= 1; ++x) {
+                for (int y = -1; y <= 1; ++y) {
+                    float pcfDepth = texture(shadowMap, vec3(projCoords.xy + vec2(x, y) * texelSize, light.params2.y)).r;
+                    pcf += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+                }
+            }
+
+            shadow = pcf / 9.0;
+        }
+    }
+
+    atten *= (1.0 - shadow);
+
+    float NdotL = max(dot(N, lightDir), 0.0);
+    vec3 halfV = normalize(lightDir + viewDir);
+    float NdotH = max(dot(N, halfV), 0.0);
+    float spec = pow(NdotH, 64.0);
+
+    vec3 lightRGB = light.color.rgb * light.color.w;
+    vec3 diffuse = NdotL * albedo * lightRGB;
+    vec3 specular = spec * 0.25 * lightRGB;
+
+    return (diffuse + specular) * atten;
+}
+
+void main() {
+    vec3 N = texture(gNormal, inUV).xyz;
+    vec3 albedo = texture(gAlbedo, inUV).rgb;
+
+    if (dot(N, N) < 0.5) {
+        outColor = vec4(albedo, 1.0);
+        return;
+    }
+
+    float depth = texture(gDepth, inUV).r;
+
+    vec4 ndc = vec4(inUV.x * 2.0 - 1.0, inUV.y * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = lightsUBO.invViewProj * ndc;
+
+    vec3 fragPos = worldPos.xyz / worldPos.w;
+
+    N = normalize(N);
+    vec3 viewDir = normalize(lightsUBO.viewPos.xyz - fragPos);
+    vec3 result = lightsUBO.ambientColor.rgb * albedo;
+
+    int cnt = lightsUBO.countPad.x;
+    for (int i = 0; i < cnt; ++i) {
+        result += evaluateLight(lightsUBO.lights[i], fragPos, N, albedo, viewDir);
+    }
+
+    result = result / (result + vec3(1.0));
+    outColor = vec4(result, 1.0);
+}
+
+//filename: ./shaders/lighting.vert
+#version 450
+
+layout(location = 0) out vec2 outUV;
+
+void main() {
+    outUV = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    gl_Position = vec4(outUV * 2.0 - 1.0, 0.0, 1.0);
+}
+
+//filename: ./shaders/phong.frag
+#version 450
+
+layout(location = 0) in vec3 fragPos;
+layout(location = 1) in vec3 fragNormal;
+layout(location = 2) in vec2 fragTexCoord;
+
+layout(set = 0, binding = 0) uniform GlobalUBO {
+    mat4 view;
+    mat4 proj;
+    vec4 lightPos;
+    vec4 lightColor;
+    vec4 viewPos;
+    vec4 ambientColor;
+} ubo;
+
+layout(set = 1, binding = 0) uniform sampler2D diffuseTex;
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    vec4 texSample = texture(diffuseTex, fragTexCoord);
+    if (texSample.a < 0.1)
+        discard;
+
+    vec3 texColor = texSample.rgb;
+
+    // Ambient
+    vec3 ambient = ubo.ambientColor.rgb * texColor;
+
+    // Diffuse
+    vec3 norm = normalize(fragNormal);
+    vec3 lightDir = normalize(ubo.lightPos.xyz - fragPos);
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * ubo.lightColor.rgb * texColor;
+
+    // Specular (Blinn-Phong half-vector)
+    vec3 viewDir = normalize(ubo.viewPos.xyz - fragPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(norm, halfDir), 0.0), 64.0);
+    vec3 specular = spec * ubo.lightColor.rgb * 0.3;
+
+    vec3 result = ambient + diffuse + specular;
+    outColor = vec4(result, 1.0);
+}
+
+//filename: ./shaders/phong.vert
+#version 450
+
+layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inNormal;
+layout(location = 2) in vec2 inTexCoord;
+
+layout(set = 0, binding = 0) uniform GlobalUBO {
+    mat4 view;
+    mat4 proj;
+    vec4 lightPos;
+    vec4 lightColor;
+    vec4 viewPos;
+    vec4 ambientColor;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+} pc;
+
+layout(location = 0) out vec3 fragPos;
+layout(location = 1) out vec3 fragNormal;
+layout(location = 2) out vec2 fragTexCoord;
+
+void main() {
+    vec4 worldPos = pc.model * vec4(inPosition, 1.0);
+    fragPos = worldPos.xyz;
+    mat3 normalMat = transpose(inverse(mat3(pc.model)));
+    fragNormal = normalMat * inNormal;
+    fragTexCoord = inTexCoord;
+    gl_Position = ubo.proj * ubo.view * worldPos;
+}
+
+//filename: ./shaders/shadows.vert
+#version 450
+
+layout(location = 0) in vec3 inPosition;
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 lightSpace;
+} pc;
+
+void main() {
+    gl_Position = pc.lightSpace * pc.model * vec4(inPosition, 1.0);
+}
+
+//filename: ./src/Camera.h
+#pragma once
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include "Input.h"
+
+class Camera {
+public:
+    glm::vec3 position = {0.0f, 1.5f, 5.0f};
+    float yaw = -90.0f;
+    float pitch = 0.0f;
+    float speed = 5.0f;
+    float mouseSens = 0.1f;
+    float fovY = 60.0f;
+
+    glm::vec3 front() const {
+        return glm::normalize(glm::vec3{
+            cos(glm::radians(yaw)) * cos(glm::radians(pitch)),
+            sin(glm::radians(pitch)),
+            sin(glm::radians(yaw)) * cos(glm::radians(pitch))
+        });
+    }
+
+    glm::vec3 right() const {
+        return glm::normalize(glm::cross(front(), glm::vec3{0, 1, 0}));
+    }
+
+    glm::mat4 view() const {
+        return glm::lookAt(position, position + front(), glm::vec3{0, 1, 0});
+    }
+
+    glm::mat4 projection(float aspect) const {
+        auto p = glm::perspective(glm::radians(fovY), aspect, 0.1f, 1000.0f);
+        p[1][1] *= -1;
+        return p;
+    }
+
+    void update(const Input& input, float dt) {
+        float v = speed * dt;
+        if (input.isKeyDown(GLFW_KEY_LEFT_SHIFT)) v *= 3.0f;
+        if (input.isKeyDown(GLFW_KEY_W)) position += front() * v;
+        if (input.isKeyDown(GLFW_KEY_S)) position -= front() * v;
+        if (input.isKeyDown(GLFW_KEY_A)) position -= right() * v;
+        if (input.isKeyDown(GLFW_KEY_D)) position += right() * v;
+        if (input.isKeyDown(GLFW_KEY_SPACE)) position.y += v;
+        if (input.isKeyDown(GLFW_KEY_LEFT_CONTROL)) position.y -= v;
+
+        glm::vec2 md = input.getMouseDelta();
+        yaw += md.x * mouseSens;
+        pitch -= md.y * mouseSens;
+        pitch = glm::clamp(pitch, -89.0f, 89.0f);
+    }
+};
+
+//filename: ./src/Engine.cpp
+#include "Engine.h"
+#include <stdexcept>
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <algorithm>
+#include <cstring>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+static const std::vector<const char*> kDeviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+
+void Engine::init(GLFWwindow* w) {
+    window = w;
+    createInstance_();
+    createSurface_(w);
+    pickPhysDevice_();
+    createDevice_();
+    createSwapchain_();
+    createCommandPool_();
+    createCommandBuffers_();
+    createSyncObjects_();
+    createMaterialLayout_();
+    createMaterialPool_();
+}
+
+void Engine::cleanup() {
+    vkDeviceWaitIdle(device);
+    for (auto& t : textures) {
+        vkDestroySampler(device, t.sampler, nullptr);
+        vkDestroyImageView(device, t.view, nullptr);
+        vkDestroyImage(device, t.image, nullptr);
+        vkFreeMemory(device, t.memory, nullptr);
+    }
+    for (auto& m : meshes) {
+        vkDestroyBuffer(device, m.vb, nullptr); vkFreeMemory(device, m.vm, nullptr);
+        vkDestroyBuffer(device, m.ib, nullptr); vkFreeMemory(device, m.im, nullptr);
+    }
+    vkDestroyDescriptorPool(device, materialPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
+    for (int i = 0; i < MAX_FRAMES; ++i) {
+        vkDestroySemaphore(device, imageAvailable[i], nullptr);
+        vkDestroySemaphore(device, renderFinished[i], nullptr);
+        vkDestroyFence(device, inFlightFences[i], nullptr);
+    }
+    vkDestroyCommandPool(device, commandPool, nullptr);
+    cleanupSwapchain_();
+    vkDestroyDevice(device, nullptr);
+    vkDestroySurfaceKHR(instance, surface, nullptr);
+    vkDestroyInstance(instance, nullptr);
+}
+
+FrameContext Engine::beginFrame() {
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    uint32_t imageIndex;
+    VkResult res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailable[currentFrame], VK_NULL_HANDLE, &imageIndex);
+    if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+        return {VK_NULL_HANDLE, 0, currentFrame, false};
+    }
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) throw std::runtime_error("vkAcquireNextImageKHR failed");
+    if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+    imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+    VkCommandBuffer cmd = commandBuffers[currentFrame];
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(cmd, &bi);
+    return {cmd, imageIndex, currentFrame, true};
+}
+
+void Engine::endFrame(const FrameContext& ctx) {
+    if (!ctx.valid) return;
+    vkEndCommandBuffer(ctx.cmd);
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &imageAvailable[ctx.frameIndex];
+    si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &ctx.cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &renderFinished[ctx.frameIndex];
+    vkResetFences(device, 1, &inFlightFences[ctx.frameIndex]);
+    vkQueueSubmit(graphicsQueue, 1, &si, inFlightFences[ctx.frameIndex]);
+    VkPresentInfoKHR pi{};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &renderFinished[ctx.frameIndex];
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &swapchain;
+    pi.pImageIndices = &ctx.imageIndex;
+    vkQueuePresentKHR(presentQueue, &pi);
+    currentFrame = (currentFrame + 1) % MAX_FRAMES;
+}
+
+TextureHandle Engine::registerTexture_(uint32_t w, uint32_t h, const unsigned char* pixels, VkDeviceSize byteSize) {
+    VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+    createBuffer(byteSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuf, stagingMem);
+    void* data; vkMapMemory(device, stagingMem, 0, byteSize, 0, &data);
+    memcpy(data, pixels, byteSize);
+    vkUnmapMemory(device, stagingMem);
+    TextureRes t;
+    createImage(w, h, 1, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, t.image, t.memory);
+    transitionLayout(t.image, 1, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    copyBufToImage(stagingBuf, t.image, w, h);
+    transitionLayout(t.image, 1, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkDestroyBuffer(device, stagingBuf, nullptr);
+    vkFreeMemory(device, stagingMem, nullptr);
+    t.view = createImageView(t.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.anisotropyEnable = VK_TRUE;
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physDevice, &props);
+    si.maxAnisotropy = props.limits.maxSamplerAnisotropy;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    vkCreateSampler(device, &si, nullptr, &t.sampler);
+
+    int id = (int)textures.size();
+    textures.push_back(std::move(t));
+    return TextureHandle{id};
+}
+
+TextureHandle Engine::loadTexture(const std::string& path) {
+    int w, h, ch;
+    stbi_set_flip_vertically_on_load(false);
+    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+    if (!pixels) {
+        std::cerr << "Failed to load texture: " << path << std::endl;
+        return createWhiteTexture();
+    }
+    auto handle = registerTexture_((uint32_t)w, (uint32_t)h, pixels, (VkDeviceSize)w*h*4);
+    stbi_image_free(pixels);
+    return handle;
+}
+
+TextureHandle Engine::createWhiteTexture() {
+    if (cachedWhiteTex.valid()) return cachedWhiteTex;
+    uint8_t white[4] = {255,255,255,255};
+    cachedWhiteTex = registerTexture_(1, 1, white, 4);
+    return cachedWhiteTex;
+}
+
+TextureHandle Engine::createDefaultNormalTexture() {
+    if (cachedDefNormTex.valid()) return cachedDefNormTex;
+    uint8_t norm[4] = {128, 128, 255, 255};
+    cachedDefNormTex = registerTexture_(1, 1, norm, 4);
+    return cachedDefNormTex;
+}
+
+TextureHandle Engine::createBlackTexture() {
+    if (cachedBlackTex.valid()) return cachedBlackTex;
+    uint8_t black[4] = {0, 0, 0, 255};
+    cachedBlackTex = registerTexture_(1, 1, black, 4);
+    return cachedBlackTex;
+}
+
+VkDescriptorSet Engine::createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp) {
+    VkDescriptorSet set;
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = materialPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &materialLayout;
+
+    if (vkAllocateDescriptorSets(device, &ai, &set) != VK_SUCCESS) {
+        throw std::runtime_error("failed to allocate material descriptor set!");
+    }
+
+    auto getImgInfo = [&](TextureHandle h) -> VkDescriptorImageInfo {
+        auto& t = textures[h.id];
+        return {t.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    };
+
+    VkDescriptorImageInfo iDiff = getImgInfo(diff);
+    VkDescriptorImageInfo iNorm = getImgInfo(norm);
+    VkDescriptorImageInfo iDisp = getImgInfo(disp);
+
+    std::array<VkWriteDescriptorSet, 3> writes{};
+    for(int i=0; i<3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].pImageInfo = &iDiff;
+    writes[1].pImageInfo = &iNorm;
+    writes[2].pImageInfo = &iDisp;
+
+    vkUpdateDescriptorSets(device, 3, writes.data(), 0, nullptr);
+    return set;
+}
+
+
+MeshHandle Engine::createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices) {
+    MeshRes m;
+    m.indexCount = (uint32_t)indices.size();
+    auto upload = [&](VkBufferUsageFlags usage, const void* src, VkDeviceSize sz, VkBuffer& buf, VkDeviceMemory& mem) {
+        VkBuffer sb; VkDeviceMemory sm;
+        createBuffer(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+        void* p; vkMapMemory(device, sm, 0, sz, 0, &p);
+        memcpy(p, src, sz); vkUnmapMemory(device, sm);
+        createBuffer(sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT|usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buf, mem);
+        copyBuffer(sb, buf, sz);
+        vkDestroyBuffer(device, sb, nullptr); vkFreeMemory(device, sm, nullptr);
+    };
+    upload(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, verts.data(), sizeof(Vertex)*verts.size(), m.vb, m.vm);
+    upload(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), sizeof(uint32_t)*indices.size(), m.ib, m.im);
+    int id = (int)meshes.size();
+    meshes.push_back(std::move(m));
+    return MeshHandle{id};
+}
+
+void Engine::createInstance_() {
+    VkApplicationInfo ai{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    ai.pApplicationName = "VulkanDeferredTessellation";
+    ai.apiVersion = VK_API_VERSION_1_2;
+    uint32_t glfwCount;
+    const char** glfwExts = glfwGetRequiredInstanceExtensions(&glfwCount);
+    std::vector<const char*> exts(glfwExts, glfwExts + glfwCount);
+    VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ci.pApplicationInfo = &ai;
+    ci.enabledExtensionCount = (uint32_t)exts.size();
+    ci.ppEnabledExtensionNames = exts.data();
+    vkCreateInstance(&ci, nullptr, &instance);
+}
+
+void Engine::createSurface_(GLFWwindow* w) {
+    glfwCreateWindowSurface(instance, w, nullptr, &surface);
+}
+
+void Engine::pickPhysDevice_() {
+    uint32_t cnt;
+    vkEnumeratePhysicalDevices(instance, &cnt, nullptr);
+    std::vector<VkPhysicalDevice> devs(cnt);
+    vkEnumeratePhysicalDevices(instance, &cnt, devs.data());
+    physDevice = devs[0];
+    for (auto d : devs) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(d, &p);
+        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { physDevice = d; break; }
+    }
+}
+
+void Engine::createDevice_() {
+    uint32_t qfCount;
+    vkGetPhysicalDeviceQueueFamilyProperties(physDevice, &qfCount, nullptr);
+    std::vector<VkQueueFamilyProperties> qf(qfCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physDevice, &qfCount, qf.data());
+    graphicsFamily = presentFamily = UINT32_MAX;
+    for (uint32_t i = 0; i < qfCount; ++i) {
+        if (qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) graphicsFamily = i;
+        VkBool32 pres = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(physDevice, i, surface, &pres);
+        if (pres) presentFamily = i;
+        if (graphicsFamily != UINT32_MAX && presentFamily != UINT32_MAX) break;
+    }
+    std::set<uint32_t> uq = {graphicsFamily, presentFamily};
+    std::vector<VkDeviceQueueCreateInfo> qcis;
+    float prio = 1.0f;
+    for (uint32_t f : uq) {
+        VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        qi.queueFamilyIndex = f; qi.queueCount = 1; qi.pQueuePriorities = &prio;
+        qcis.push_back(qi);
+    }
+    VkPhysicalDeviceFeatures features{};
+    features.samplerAnisotropy = VK_TRUE;
+    features.tessellationShader = VK_TRUE;
+
+    VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    ci.queueCreateInfoCount = (uint32_t)qcis.size();
+    ci.pQueueCreateInfos = qcis.data();
+    ci.enabledExtensionCount = (uint32_t)kDeviceExtensions.size();
+    ci.ppEnabledExtensionNames = kDeviceExtensions.data();
+    ci.pEnabledFeatures = &features;
+    vkCreateDevice(physDevice, &ci, nullptr, &device);
+    vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
+    vkGetDeviceQueue(device, presentFamily, 0, &presentQueue);
+}
+
+void Engine::createSwapchain_() {
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDevice, surface, &caps);
+    uint32_t fmtCnt;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(physDevice, surface, &fmtCnt, nullptr);
+    std::vector<VkSurfaceFormatKHR> fmts(fmtCnt);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(physDevice, surface, &fmtCnt, fmts.data());
+    uint32_t pmCnt;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice, surface, &pmCnt, nullptr);
+    std::vector<VkPresentModeKHR> pms(pmCnt);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice, surface, &pmCnt, pms.data());
+    VkSurfaceFormatKHR fmt = fmts[0];
+    for (auto& f : fmts)
+        if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { fmt = f; break; }
+    VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
+    for (auto m : pms) if (m == VK_PRESENT_MODE_MAILBOX_KHR) { pm = m; break; }
+
+    if (caps.currentExtent.width != UINT32_MAX) {
+        swapExtent = caps.currentExtent;
+    } else {
+        int w, h; glfwGetFramebufferSize(window, &w, &h);
+        swapExtent.width = std::clamp((uint32_t)w, caps.minImageExtent.width, caps.maxImageExtent.width);
+        swapExtent.height = std::clamp((uint32_t)h, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+
+    uint32_t imgCnt = caps.minImageCount + 1;
+    if (caps.maxImageCount > 0) imgCnt = std::min(imgCnt, caps.maxImageCount);
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    ci.surface = surface;
+    ci.minImageCount = imgCnt;
+    ci.imageFormat = fmt.format;
+    ci.imageColorSpace = fmt.colorSpace;
+    ci.imageExtent = swapExtent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    uint32_t families[] = {graphicsFamily, presentFamily};
+    if (graphicsFamily != presentFamily) {
+        ci.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        ci.queueFamilyIndexCount = 2;
+        ci.pQueueFamilyIndices = families;
+    } else {
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    ci.presentMode = pm;
+    ci.clipped = VK_TRUE;
+    vkCreateSwapchainKHR(device, &ci, nullptr, &swapchain);
+    swapFormat = fmt.format;
+    vkGetSwapchainImagesKHR(device, swapchain, &imgCnt, nullptr);
+    swapImages.resize(imgCnt);
+    vkGetSwapchainImagesKHR(device, swapchain, &imgCnt, swapImages.data());
+    swapImageViews.resize(imgCnt);
+    for (size_t i = 0; i < imgCnt; ++i)
+        swapImageViews[i] = createImageView(swapImages[i], swapFormat, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+}
+
+void Engine::createCommandPool_() {
+    VkCommandPoolCreateInfo ci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    ci.queueFamilyIndex = graphicsFamily;
+    ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    vkCreateCommandPool(device, &ci, nullptr, &commandPool);
+}
+
+void Engine::createCommandBuffers_() {
+    commandBuffers.resize(MAX_FRAMES);
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = commandPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = MAX_FRAMES;
+    vkAllocateCommandBuffers(device, &ai, commandBuffers.data());
+}
+
+void Engine::createSyncObjects_() {
+    imageAvailable.resize(MAX_FRAMES);
+    renderFinished.resize(MAX_FRAMES);
+    inFlightFences.resize(MAX_FRAMES);
+    imagesInFlight.resize(swapImages.size(), VK_NULL_HANDLE);
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (int i = 0; i < MAX_FRAMES; ++i) {
+        vkCreateSemaphore(device, &si, nullptr, &imageAvailable[i]);
+        vkCreateSemaphore(device, &si, nullptr, &renderFinished[i]);
+        vkCreateFence(device, &fi, nullptr, &inFlightFences[i]);
+    }
+}
+
+void Engine::createMaterialLayout_() {
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    // Diffuse
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Normal
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+
+    VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ci.bindingCount = (uint32_t)bindings.size();
+    ci.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialLayout);
+}
+
+void Engine::createMaterialPool_() {
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2048 * 3};
+    VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    ci.poolSizeCount = 1;
+    ci.pPoolSizes = &ps;
+    ci.maxSets = 2048;
+    vkCreateDescriptorPool(device, &ci, nullptr, &materialPool);
+}
+
+void Engine::cleanupSwapchain_() {
+    for (auto iv : swapImageViews) vkDestroyImageView(device, iv, nullptr);
+    swapImageViews.clear();
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+}
+
+void Engine::recreateSwapchain() {
+    int w = 0, h = 0;
+    glfwGetFramebufferSize(window, &w, &h);
+    while (w == 0 || h == 0) {
+        glfwGetFramebufferSize(window, &w, &h);
+        glfwWaitEvents();
+    }
+    vkDeviceWaitIdle(device);
+    cleanupSwapchain_();
+    createSwapchain_();
+    imagesInFlight.assign(swapImages.size(), VK_NULL_HANDLE);
+}
+
+uint32_t Engine::findMemoryType(uint32_t filter, VkMemoryPropertyFlags flags) const {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(physDevice, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((filter & (1 << i)) && (mp.memoryTypes[i].propertyFlags & flags) == flags) return i;
+    return 0;
+}
+
+VkFormat Engine::findDepthFormat() const {
+    for (VkFormat fmt : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(physDevice, fmt, &p);
+        if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) return fmt;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+std::vector<char> Engine::readFile(const std::string& path) const {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) {
+        throw std::runtime_error("Failed to open file: " + path + " (Make sure you are running the program from the correct working directory!)");
+    }
+    size_t sz = (size_t)f.tellg();
+    f.seekg(0);
+    std::vector<char> buf(sz);
+    f.read(buf.data(), sz);
+    return buf;
+}
+
+void Engine::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buf, VkDeviceMemory& mem) {
+    VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    ci.size = size; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(device, &ci, nullptr, &buf);
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device, buf, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, props);
+    vkAllocateMemory(device, &ai, nullptr, &mem);
+    vkBindBufferMemory(device, buf, mem, 0);
+}
+
+void Engine::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+    VkCommandBuffer cmd = beginSingleTime();
+    VkBufferCopy region{0, 0, size};
+    vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+    endSingleTime(cmd);
+}
+
+VkCommandBuffer Engine::beginSingleTime() {
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = commandPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device, &ai, &cmd);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    return cmd;
+}
+
+void Engine::endSingleTime(VkCommandBuffer cmd) {
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue);
+    vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+}
+
+void Engine::createImage(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags props, VkImage& img, VkDeviceMemory& mem) {
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D; ci.extent = {w, h, 1};
+    ci.mipLevels = 1; ci.arrayLayers = layers; ci.format = fmt;
+    ci.tiling = tiling; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ci.usage = usage; ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateImage(device, &ci, nullptr, &img);
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device, img, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, props);
+    vkAllocateMemory(device, &ai, nullptr, &mem);
+    vkBindImageMemory(device, img, mem, 0);
+}
+
+void Engine::transitionLayout(VkImage img, uint32_t layers, VkFormat fmt, VkImageLayout from, VkImageLayout to) {
+    VkCommandBuffer cmd = beginSingleTime();
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = from; barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = img;
+    bool isDepth = (fmt == VK_FORMAT_D32_SFLOAT || fmt == VK_FORMAT_D24_UNORM_S8_UINT || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT);
+    barrier.subresourceRange.aspectMask = isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (fmt == VK_FORMAT_D24_UNORM_S8_UINT || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = layers;
+    VkPipelineStageFlags src, dst;
+    if (from == VK_IMAGE_LAYOUT_UNDEFINED && to == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT; dst = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (from == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && to == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; src = VK_PIPELINE_STAGE_TRANSFER_BIT; dst = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else if (from == VK_IMAGE_LAYOUT_UNDEFINED && to == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT; dst = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    } else if (from == VK_IMAGE_LAYOUT_UNDEFINED && to == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT; dst = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    } else if (from == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && to == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; src = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dst = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else {
+        return;
+    }
+    vkCmdPipelineBarrier(cmd, src, dst, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    endSingleTime(cmd);
+}
+
+void Engine::copyBufToImage(VkBuffer buf, VkImage img, uint32_t w, uint32_t h) {
+    VkCommandBuffer cmd = beginSingleTime();
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {w, h, 1};
+    vkCmdCopyBufferToImage(cmd, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    endSingleTime(cmd);
+}
+
+VkImageView Engine::createImageView(VkImage img, VkFormat fmt, VkImageAspectFlags aspect, uint32_t baseLayer, uint32_t layerCount, VkImageViewType viewType) const {
+    VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    ci.image = img;
+    ci.viewType = viewType;
+    ci.format = fmt;
+    ci.subresourceRange.aspectMask = aspect;
+    ci.subresourceRange.levelCount = 1;
+    ci.subresourceRange.baseArrayLayer = baseLayer;
+    ci.subresourceRange.layerCount = layerCount;
+    VkImageView view;
+    vkCreateImageView(device, &ci, nullptr, &view);
+    return view;
+}
+
+VkShaderModule Engine::createShaderModule(const std::vector<char>& code) const {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = code.size();
+    ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModule sm;
+    vkCreateShaderModule(device, &ci, nullptr, &sm);
+    return sm;
+}
+
+//filename: ./src/Engine.h
+//filename: ./src/Engine.h
+#pragma once
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <vector>
+#include <string>
+#include <array>
+
+struct Vertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec2 texCoord;
+    glm::vec3 tangent;
+
+    static VkVertexInputBindingDescription getBindingDesc() {
+        VkVertexInputBindingDescription d{};
+        d.binding = 0;
+        d.stride = sizeof(Vertex);
+        d.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return d;
+    }
+    static std::array<VkVertexInputAttributeDescription, 4> getAttrDescs() {
+        std::array<VkVertexInputAttributeDescription, 4> a{};
+        a[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, pos)};
+        a[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)};
+        a[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, texCoord)};
+        a[3] = {3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, tangent)};
+        return a;
+    }
+};
+
+struct TextureHandle { int id = -1; bool valid() const { return id >= 0; } };
+struct MeshHandle { int id = -1; bool valid() const { return id >= 0; } };
+
+struct SubMesh {
+    MeshHandle mesh;
+    TextureHandle texture;
+    TextureHandle normalMap;
+    TextureHandle dispMap;
+    VkDescriptorSet matSet = VK_NULL_HANDLE;
+    std::vector<TextureHandle> animTextures;
+    float dispScale = 0.0f;
+};
+
+struct SceneObject {
+    std::vector<SubMesh> submeshes;
+    glm::mat4 transform = glm::mat4(1.0f);
+    bool animatable = false;
+    int animFrame = 0;
+    bool unlit = false;
+    glm::vec4 unlitColor = {1,1,1,1};
+
+    void nextAnimFrame() {
+        if (!animatable) return;
+        ++animFrame;
+        for (auto& sm : submeshes) {
+            if (!sm.animTextures.empty()) {
+                sm.texture = sm.animTextures[animFrame % (int)sm.animTextures.size()];
+            }
+        }
+    }
+};
+
+struct FrameContext {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    uint32_t imageIndex = 0;
+    int frameIndex = 0;
+    bool valid = false;
+};
+
+class Engine {
+public:
+    static constexpr int MAX_FRAMES = 2;
+
+    void init(GLFWwindow* window);
+    void cleanup();
+    FrameContext beginFrame();
+    void endFrame(const FrameContext& ctx);
+    void recreateSwapchain();
+
+    TextureHandle loadTexture(const std::string& path);
+    TextureHandle createWhiteTexture();
+    TextureHandle createDefaultNormalTexture();
+    TextureHandle createBlackTexture();
+
+    VkDescriptorSet createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp);
+    MeshHandle createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices);
+
+    VkDevice getDevice() const { return device; }
+    VkPhysicalDevice getPhysDevice() const { return physDevice; }
+    VkQueue getGraphicsQueue() const { return graphicsQueue; }
+    VkCommandPool getCommandPool() const { return commandPool; }
+    uint32_t getGraphicsFamily() const { return graphicsFamily; }
+
+    VkExtent2D getSwapExtent() const { return swapExtent; }
+    VkFormat getSwapFormat() const { return swapFormat; }
+    const std::vector<VkImageView>& getSwapImageViews() const { return swapImageViews; }
+    size_t getSwapImageCount() const { return swapImages.size(); }
+
+    VkDescriptorSetLayout getMaterialLayout() const { return materialLayout; }
+
+    void bindAndDrawMesh_(VkCommandBuffer cmd, MeshHandle h) const {
+        if (!h.valid()) return;
+        const auto& m = meshes[h.id];
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vb, &offset);
+        vkCmdBindIndexBuffer(cmd, m.ib, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+    }
+
+    uint32_t findMemoryType(uint32_t filter, VkMemoryPropertyFlags flags) const;
+    VkFormat findDepthFormat() const;
+    std::vector<char> readFile(const std::string& path) const;
+
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buf, VkDeviceMemory& mem);
+    void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
+
+    VkCommandBuffer beginSingleTime();
+    void endSingleTime(VkCommandBuffer cmd);
+
+    void createImage(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags props, VkImage& img, VkDeviceMemory& mem);
+    void transitionLayout(VkImage img, uint32_t layers, VkFormat fmt, VkImageLayout from, VkImageLayout to);
+    void copyBufToImage(VkBuffer buf, VkImage img, uint32_t w, uint32_t h);
+
+    VkImageView createImageView(VkImage img, VkFormat fmt, VkImageAspectFlags aspect, uint32_t baseLayer, uint32_t layerCount, VkImageViewType viewType) const;
+    VkShaderModule createShaderModule(const std::vector<char>& code) const;
+
+private:
+    GLFWwindow* window = nullptr;
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physDevice = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue graphicsQueue = VK_NULL_HANDLE;
+    VkQueue presentQueue = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    uint32_t graphicsFamily = 0;
+    uint32_t presentFamily = 0;
+
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    std::vector<VkImage> swapImages;
+    std::vector<VkImageView> swapImageViews;
+    VkFormat swapFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D swapExtent = {};
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<VkSemaphore> imageAvailable;
+    std::vector<VkSemaphore> renderFinished;
+    std::vector<VkFence> inFlightFences;
+    std::vector<VkFence> imagesInFlight;
+    int currentFrame = 0;
+
+    struct TextureRes {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+    struct MeshRes {
+        VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+        VkDeviceMemory vm = VK_NULL_HANDLE, im = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+    };
+    std::vector<TextureRes> textures;
+    std::vector<MeshRes> meshes;
+
+    TextureHandle cachedWhiteTex;
+    TextureHandle cachedDefNormTex;
+    TextureHandle cachedBlackTex;
+
+    VkDescriptorPool materialPool = VK_NULL_HANDLE;
+    VkDescriptorSetLayout materialLayout = VK_NULL_HANDLE;
+
+    void createInstance_();
+    void createSurface_(GLFWwindow* w);
+    void pickPhysDevice_();
+    void createDevice_();
+    void createSwapchain_();
+    void createCommandPool_();
+    void createCommandBuffers_();
+    void createSyncObjects_();
+    void createMaterialLayout_();
+    void createMaterialPool_();
+    void cleanupSwapchain_();
+
+    TextureHandle registerTexture_(uint32_t w, uint32_t h, const unsigned char* pixels, VkDeviceSize size);
+};
+
+//filename: ./src/GBuffer.cpp
+#include "GBuffer.h"
+#include "Engine.h"
+
+void GBuffer::init(Engine& engine, uint32_t width, uint32_t height) {
+    extent = {width, height};
+    createAttachments_(engine);
+    createSampler_(engine.getDevice());
+    createRenderPass_(engine);
+    createFramebuffer_(engine);
+}
+
+void GBuffer::cleanup(VkDevice device) {
+    vkDestroyFramebuffer(device, framebuffer, nullptr); framebuffer = VK_NULL_HANDLE;
+    vkDestroyRenderPass(device, renderPass, nullptr); renderPass = VK_NULL_HANDLE;
+    vkDestroySampler(device, sampler, nullptr); sampler = VK_NULL_HANDLE;
+    destroyAttachments_(device);
+}
+
+void GBuffer::recreate(Engine& engine, uint32_t width, uint32_t height) {
+    vkDeviceWaitIdle(engine.getDevice());
+    VkDevice dev = engine.getDevice();
+    vkDestroyFramebuffer(dev, framebuffer, nullptr);
+    destroyAttachments_(dev);
+    extent = {width, height};
+    createAttachments_(engine);
+    createFramebuffer_(engine);
+}
+
+void GBuffer::createAttachments_(Engine& engine) {
+    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO };
+    for (int i = 0; i < NUM_ATTACHMENTS; ++i) {
+        engine.createImage(extent.width, extent.height, 1, fmts[i], VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, images[i], memories[i]);
+        views[i] = engine.createImageView(images[i], fmts[i], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+        engine.transitionLayout(images[i], 1, fmts[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    VkFormat depthFmt = engine.findDepthFormat();
+
+    engine.createImage(extent.width, extent.height, 1, depthFmt, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthMemory);
+    depthView = engine.createImageView(depthImage, depthFmt, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+    engine.transitionLayout(depthImage, 1, depthFmt, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+}
+
+void GBuffer::createSampler_(VkDevice device) {
+    if (sampler != VK_NULL_HANDLE) return;
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    vkCreateSampler(device, &si, nullptr, &sampler);
+}
+
+void GBuffer::createRenderPass_(Engine& engine) {
+    if (renderPass != VK_NULL_HANDLE) return;
+    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO };
+    VkFormat depthFmt = engine.findDepthFormat();
+    std::array<VkAttachmentDescription, 3> atts{}; // Теперь 3 (Normal, Albedo, Depth)
+
+    for (int i = 0; i < NUM_ATTACHMENTS; ++i) {
+        atts[i].format = fmts[i]; atts[i].samples = VK_SAMPLE_COUNT_1_BIT; atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        atts[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[i].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; atts[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    atts[2].format = depthFmt; atts[2].samples = VK_SAMPLE_COUNT_1_BIT; atts[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    atts[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    atts[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkAttachmentReference, NUM_ATTACHMENTS> colorRefs{};
+    for (int i = 0; i < NUM_ATTACHMENTS; ++i) colorRefs[i] = {(uint32_t)i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = NUM_ATTACHMENTS;
+    subpass.pColorAttachments = colorRefs.data(); subpass.pDepthStencilAttachment = &depthRef;
+
+    std::array<VkSubpassDependency, 2> deps{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+    deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT; deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = (uint32_t)atts.size(); rpci.pAttachments = atts.data(); rpci.subpassCount = 1; rpci.pSubpasses = &subpass;
+    rpci.dependencyCount = (uint32_t)deps.size(); rpci.pDependencies = deps.data();
+    vkCreateRenderPass(engine.getDevice(), &rpci, nullptr, &renderPass);
+}
+
+void GBuffer::createFramebuffer_(Engine& engine) {
+    std::array<VkImageView, 3> attachments = {views[0], views[1], depthView};
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = renderPass; fci.attachmentCount = (uint32_t)attachments.size(); fci.pAttachments = attachments.data();
+    fci.width = extent.width; fci.height = extent.height; fci.layers = 1;
+    vkCreateFramebuffer(engine.getDevice(), &fci, nullptr, &framebuffer);
+}
+
+void GBuffer::destroyAttachments_(VkDevice device) {
+    for (int i = 0; i < NUM_ATTACHMENTS; ++i) {
+        vkDestroyImageView(device, views[i], nullptr); vkDestroyImage(device, images[i], nullptr); vkFreeMemory(device, memories[i], nullptr);
+        views[i] = VK_NULL_HANDLE; images[i] = VK_NULL_HANDLE; memories[i] = VK_NULL_HANDLE;
+    }
+    vkDestroyImageView(device, depthView, nullptr); vkDestroyImage(device, depthImage, nullptr); vkFreeMemory(device, depthMemory, nullptr);
+    depthView = VK_NULL_HANDLE; depthImage = VK_NULL_HANDLE; depthMemory = VK_NULL_HANDLE;
+}
+
+//filename: ./src/GBuffer.h
+#pragma once
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#include <array>
+
+class Engine;
+
+class GBuffer {
+public:
+    static constexpr int NUM_ATTACHMENTS = 2; // Уменьшили с 3 до 2
+    static constexpr VkFormat FORMAT_NORMAL = VK_FORMAT_R16G16B16A16_SFLOAT;
+    static constexpr VkFormat FORMAT_ALBEDO = VK_FORMAT_R8G8B8A8_UNORM;
+
+    void init(Engine& engine, uint32_t width, uint32_t height);
+    void cleanup(VkDevice device);
+    void recreate(Engine& engine, uint32_t width, uint32_t height);
+
+    VkRenderPass getRenderPass() const { return renderPass; }
+    VkFramebuffer getFramebuffer() const { return framebuffer; }
+
+    // PositionView удален, вместо него отдаем DepthView
+    VkImageView getNormalView() const { return views[0]; }
+    VkImageView getAlbedoView() const { return views[1]; }
+    VkImageView getDepthView()  const { return depthView; }
+
+    VkSampler getSampler() const { return sampler; }
+    VkExtent2D getExtent() const { return extent; }
+
+private:
+    VkExtent2D extent{};
+    std::array<VkImage, NUM_ATTACHMENTS> images{};
+    std::array<VkDeviceMemory, NUM_ATTACHMENTS> memories{};
+    std::array<VkImageView, NUM_ATTACHMENTS> views{};
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+    VkImageView depthView = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+
+    void createAttachments_(Engine& engine);
+    void createRenderPass_(Engine& engine);
+    void createFramebuffer_(Engine& engine);
+    void createSampler_(VkDevice device);
+    void destroyAttachments_(VkDevice device);
+};
+
+//filename: ./src/Input.cpp
+#include "Input.h"
+
+void Input::init(GLFWwindow* win) {
+    window = win;
+    glfwSetWindowUserPointer(window, this);
+    glfwSetKeyCallback(window, keyCB);
+    glfwSetCursorPosCallback(window, mouseCB);
+    glfwSetFramebufferSizeCallback(window, framebufferCB);
+    setMouseCapture(true);
+}
+
+void Input::update() {
+    mouseDelta = glm::vec2(0.0f);
+    glfwPollEvents();
+}
+
+bool Input::isKeyDown(int key) const {
+    if (key >= 0 && key <= GLFW_KEY_LAST) {
+        return keys.test(key);
+    }
+    return false;
+}
+
+glm::vec2 Input::getMouseDelta() const {
+    return mouseDelta;
+}
+
+bool Input::wasResized() const {
+    return resized;
+}
+
+void Input::clearResized() {
+    resized = false;
+}
+
+void Input::setMouseCapture(bool c) {
+    captured = c;
+    glfwSetInputMode(window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    firstMouse = true;
+}
+
+bool Input::isMouseCaptured() const {
+    return captured;
+}
+
+void Input::keyCB(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (!input || key < 0 || key > GLFW_KEY_LAST) return;
+    if (action == GLFW_PRESS) input->keys.set(key);
+    else if (action == GLFW_RELEASE) input->keys.reset(key);
+
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        input->setMouseCapture(!input->isMouseCaptured());
+    }
+}
+
+void Input::mouseCB(GLFWwindow* window, double xpos, double ypos) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (!input || !input->captured) return;
+    glm::vec2 currentPos((float)xpos, (float)ypos);
+    if (input->firstMouse) {
+        input->mousePos = currentPos;
+        input->firstMouse = false;
+    }
+    input->mouseDelta += (currentPos - input->mousePos);
+    input->mousePos = currentPos;
+}
+
+void Input::framebufferCB(GLFWwindow* window, int width, int height) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (input) input->resized = true;
+}
+
+//filename: ./src/Input.h
+#pragma once
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <bitset>
+
+class Input {
+public:
+    inline void init(GLFWwindow* win);
+    inline void update();
+    inline bool isKeyDown(int key) const;
+    inline glm::vec2 getMouseDelta() const;
+    inline bool wasResized() const;
+    inline void clearResized();
+    inline void setMouseCapture(bool captured);
+    inline bool isMouseCaptured() const;
+
+private:
+    static inline void keyCB(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static inline void mouseCB(GLFWwindow* window, double xpos, double ypos);
+    static inline void framebufferCB(GLFWwindow* window, int width, int height);
+
+    GLFWwindow* window = nullptr;
+    std::bitset<GLFW_KEY_LAST + 1> keys;
+    glm::vec2 mousePos{0.0f};
+    glm::vec2 mouseDelta{0.0f};
+    bool firstMouse = true;
+    bool captured = true;
+    bool resized = false;
+};
+
+inline void Input::init(GLFWwindow* win) {
+    window = win;
+    glfwSetWindowUserPointer(window, this);
+    glfwSetKeyCallback(window, keyCB);
+    glfwSetCursorPosCallback(window, mouseCB);
+    glfwSetFramebufferSizeCallback(window, framebufferCB);
+    setMouseCapture(true);
+}
+
+inline void Input::update() {
+    mouseDelta = glm::vec2(0.0f);
+    glfwPollEvents();
+}
+
+inline bool Input::isKeyDown(int key) const {
+    if (key >= 0 && key <= GLFW_KEY_LAST) {
+        return keys.test(key);
+    }
+    return false;
+}
+
+inline glm::vec2 Input::getMouseDelta() const {
+    return mouseDelta;
+}
+
+inline bool Input::wasResized() const {
+    return resized;
+}
+
+inline void Input::clearResized() {
+    resized = false;
+}
+
+inline void Input::setMouseCapture(bool c) {
+    captured = c;
+    glfwSetInputMode(window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    firstMouse = true;
+}
+
+inline bool Input::isMouseCaptured() const {
+    return captured;
+}
+
+inline void Input::keyCB(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (!input || key < 0 || key > GLFW_KEY_LAST) return;
+    if (action == GLFW_PRESS) input->keys.set(key);
+    else if (action == GLFW_RELEASE) input->keys.reset(key);
+
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        input->setMouseCapture(!input->isMouseCaptured());
+    }
+}
+
+inline void Input::mouseCB(GLFWwindow* window, double xpos, double ypos) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (!input || !input->captured) return;
+    glm::vec2 currentPos((float)xpos, (float)ypos);
+    if (input->firstMouse) {
+        input->mousePos = currentPos;
+        input->firstMouse = false;
+    }
+    input->mouseDelta += (currentPos - input->mousePos);
+    input->mousePos = currentPos;
+}
+
+inline void Input::framebufferCB(GLFWwindow* window, int width, int height) {
+    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
+    if (input) input->resized = true;
+}
+
+//filename: ./src/Light.h
+#pragma once
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+enum class LightType : int { Directional = 0, Point = 1, Spot = 2 };
+
+struct LightData {
+    glm::vec4 position;
+    glm::vec4 direction;
+    glm::vec4 color;
+    glm::vec4 params;
+    glm::vec4 params2;
+    glm::mat4 lightSpace;
+};
+
+namespace Light {
+    inline LightData makeDirectional(glm::vec3 dir, glm::vec3 color = {1,1,1}, float intensity = 1.0f, bool castShadow = false, int shadowLayer = 0) {
+        LightData d{};
+        d.direction = glm::vec4(glm::normalize(dir), 0.0f); d.color = glm::vec4(color, intensity);
+        d.params = glm::vec4((float)LightType::Directional, 0, 0, 0); d.params2 = glm::vec4(castShadow ? 1.0f : 0.0f, (float)shadowLayer, 0, 0);
+        glm::mat4 proj = glm::ortho(-25.0f, 25.0f, -25.0f, 25.0f, -50.0f, 50.0f); proj[1][1] *= -1;
+        glm::vec3 pos = glm::vec3(0.0f); glm::vec3 nDir = glm::normalize(dir);
+        glm::vec3 up = (std::abs(nDir.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
+        glm::mat4 view = glm::lookAt(pos - nDir * 20.0f, pos, up); d.lightSpace = proj * view;
+        return d;
+    }
+    inline LightData makePoint(glm::vec3 pos, glm::vec3 color = {1,1,1}, float intensity = 1.0f, float range = 10.0f) {
+        LightData d{};
+        d.position = glm::vec4(pos, 1.0f); d.color = glm::vec4(color, intensity);
+        d.params = glm::vec4((float)LightType::Point, 0, 0, range); d.params2 = glm::vec4(0); d.lightSpace = glm::mat4(1.0f);
+        return d;
+    }
+    inline LightData makeSpot(glm::vec3 pos, glm::vec3 dir, float innerDeg = 12.5f, float outerDeg = 17.5f, glm::vec3 color = {1,1,1}, float intensity = 1.0f, float range = 20.0f, bool castShadow = false, int shadowLayer = 0) {
+        LightData d{};
+        d.position = glm::vec4(pos, 1.0f); d.direction = glm::vec4(glm::normalize(dir), 0.0f); d.color = glm::vec4(color, intensity);
+        d.params = glm::vec4((float)LightType::Spot, glm::cos(glm::radians(innerDeg)), glm::cos(glm::radians(outerDeg)), range);
+        d.params2 = glm::vec4(castShadow ? 1.0f : 0.0f, (float)shadowLayer, 0, 0);
+        glm::mat4 proj = glm::perspective(glm::radians(outerDeg * 2.0f), 1.0f, 1.0f, range); proj[1][1] *= -1;
+        glm::vec3 nDir = glm::normalize(dir); glm::vec3 up = (std::abs(nDir.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
+        glm::mat4 view = glm::lookAt(pos, pos + nDir, up); d.lightSpace = proj * view;
+        return d;
+    }
+}
+
+static constexpr int MAX_LIGHTS = 64;
+
+struct LightsUBO {
+    glm::vec4 viewPos;
+    glm::vec4 ambientColor;
+    glm::ivec4 countPad;
+    glm::mat4 invViewProj;
+    LightData lights[MAX_LIGHTS];
+};
+
+//filename: ./src/Mesh.cpp
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+#include <unordered_map>
+#include "Mesh.h"
+#include <filesystem>
+#include <stdexcept>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+
+namespace fs = std::filesystem;
+
+static std::string readFile(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("cannot open: " + path);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+static std::string readFirstMtlName(const std::string& mtlText) {
+    std::istringstream ss(mtlText);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.rfind("newmtl", 0) == 0) {
+            std::istringstream ls(line);
+            std::string token, name;
+            ls >> token >> name;
+            return name;
+        }
+    }
+    return {};
+}
+
+static std::string patchOBJ(const std::string& objText, const std::string& realMatName) {
+    std::istringstream in(objText);
+    std::ostringstream out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("mtllib", 0) == 0);
+        else if (line.rfind("usemtl", 0) == 0)
+            out << "usemtl " << realMatName << "\n";
+        else
+            out << line << "\n";
+    }
+    return out.str();
+}
+
+std::vector<MeshData> loadOBJ(const std::string& path) {
+    fs::path objDir = fs::path(path).parent_path();
+
+    std::string mtlPath;
+    for (auto& e : fs::directory_iterator(objDir))
+        if (e.path().extension() == ".mtl") { mtlPath = e.path().string(); break; }
+
+    tinyobj::ObjReaderConfig cfg;
+    cfg.mtl_search_path = objDir.string();
+    cfg.triangulate     = true;
+
+    tinyobj::ObjReader reader;
+
+    if (!mtlPath.empty()) {
+        std::string mtlText     = readFile(mtlPath);
+        std::string realMatName = readFirstMtlName(mtlText);
+        std::string objText     = patchOBJ(readFile(path), realMatName);
+
+        std::cout << "using mtl: " << mtlPath << "\n";
+        std::cout << "patching usemtl -> '" << realMatName << "'\n";
+
+        if (!reader.ParseFromString(objText, mtlText, cfg))
+            throw std::runtime_error(reader.Error());
+    } else {
+        if (!reader.ParseFromFile(path, cfg))
+            throw std::runtime_error(reader.Error());
+    }
+
+    if (!reader.Warning().empty())
+        std::cerr << "[obj warning] " << reader.Warning() << "\n";
+
+    auto& attrib    = reader.GetAttrib();
+    auto& shapes    = reader.GetShapes();
+    auto& materials = reader.GetMaterials();
+
+    std::cout << "materials found: " << materials.size() << "\n";
+    for (auto& mat : materials)
+        std::cout << "  mat: '" << mat.name << "' tex: '" << mat.diffuse_texname << "'\n";
+
+    std::unordered_map<int, MeshData> groups;
+
+    for (auto& shape : shapes) {
+        size_t offset = 0;
+        for (size_t fi = 0; fi < shape.mesh.num_face_vertices.size(); fi++) {
+            int fv    = shape.mesh.num_face_vertices[fi];
+            int matId = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[fi];
+
+            MeshData& md = groups[matId];
+
+            if (md.texturePath.empty() && matId >= 0 && matId < (int)materials.size()) {
+                auto& tex = materials[matId].diffuse_texname;
+                if (!tex.empty())
+                    md.texturePath = objDir.string() + "/" + tex;
+            }
+
+            for (int v = 0; v < fv; v++) {
+                auto idx = shape.mesh.indices[offset + v];
+                Vertex vert{};
+
+                vert.pos = {
+                    attrib.vertices[3 * idx.vertex_index + 0],
+                    attrib.vertices[3 * idx.vertex_index + 1],
+                    attrib.vertices[3 * idx.vertex_index + 2],
+                };
+
+                if (idx.normal_index >= 0)
+                    vert.normal = {
+                        attrib.normals[3 * idx.normal_index + 0],
+                        attrib.normals[3 * idx.normal_index + 1],
+                        attrib.normals[3 * idx.normal_index + 2],
+                    };
+
+                if (idx.texcoord_index >= 0)
+                    vert.uv = {
+                        attrib.texcoords[2 * idx.texcoord_index + 0],
+                        1.f - attrib.texcoords[2 * idx.texcoord_index + 1],
+                    };
+
+                md.indices.push_back(md.vertices.size());
+                md.vertices.push_back(vert);
+            }
+            offset += fv;
+        }
+    }
+
+    std::vector<MeshData> out;
+    for (auto& [id, md] : groups) {
+        if (md.vertices.empty() || md.indices.empty()) continue;
+        std::cout << "  mesh group " << id << ": "
+                  << md.vertices.size() << " verts, tex: "
+                  << (md.texturePath.empty() ? "(none)" : md.texturePath) << "\n";
+        out.push_back(std::move(md));
+    }
+
+    std::cout << "loaded " << path << " (" << out.size() << " meshes)\n";
+    return out;
+}
+
+//filename: ./src/Mesh.h
+#pragma once
+#include "Types.h"
+#include <string>
+#include <vector>
+
+std::vector<MeshData> loadOBJ(const std::string& path);
+
+//filename: ./src/Renderer.cpp
+#include "Renderer.h"
+#include <vulkan/vulkan_core.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include "Mesh.h"
+#include <fstream>
+#include <stdexcept>
+#include <iostream>
+#include <set>
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
+
+static const std::vector<const char*> kDevExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+static const std::vector<const char*> kLayers  = { "VK_LAYER_KHRONOS_validation" };
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL debugCb(
+    VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT,
+    const VkDebugUtilsMessengerCallbackDataEXT* d, void*)
+{
+    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+        std::cerr << "[vk] " << d->pMessage << "\n";
+    return VK_FALSE;
+}
+
+Renderer::Renderer(Window& window) : m_win(window) {
+#ifndef NDEBUG
+    m_validation = true;
+#endif
+    initInstance();
+    initSurface();
+    initDevice();
+    initSwapchain();
+    initImageViews();
+    initRenderPass();
+    initDepth();
+    initFramebuffers();
+    initCmdPool();
+    initDescLayout();
+    initPipeline();
+    initWhiteTex();
+    initUBOs();
+    initDescPool();
+    initCmdBuffers();
+    initSync();
+
+    m_ubo.lightPos   = glm::vec4(3, 5, 3, 0);
+    m_ubo.lightColor = glm::vec4(1, 1, 1, 64);
+    m_ubo.uvOffset   = glm::vec2(0, 0);
+    m_ubo.uvScale    = glm::vec2(1, 1);
+    setCamera({0, 1, 3}, {0, 0, 0}, {0, 1, 0});
+}
+
+Renderer::~Renderer() {
+    vkDeviceWaitIdle(m_dev);
+    destroySwapchain();
+
+    clearMeshes();
+
+    if (m_wS)   vkDestroySampler(m_dev, m_wS, nullptr);
+    if (m_wV)   vkDestroyImageView(m_dev, m_wV, nullptr);
+    if (m_wImg) vkDestroyImage(m_dev, m_wImg, nullptr);
+    if (m_wMem) vkFreeMemory(m_dev, m_wMem, nullptr);
+
+    for (int i = 0; i < FRAMES; ++i) {
+        vkDestroyBuffer(m_dev, m_ub[i], nullptr);
+        vkFreeMemory(m_dev, m_ubm[i], nullptr);
+    }
+
+    vkDestroyDescriptorPool(m_dev, m_dp, nullptr);
+    vkDestroyDescriptorSetLayout(m_dev, m_dsl, nullptr);
+    vkDestroyPipeline(m_dev, m_pipe, nullptr);
+    vkDestroyPipelineLayout(m_dev, m_pl, nullptr);
+    vkDestroyRenderPass(m_dev, m_rp, nullptr);
+    vkDestroyCommandPool(m_dev, m_cp, nullptr);
+
+    for (int i = 0; i < FRAMES; ++i) {
+        vkDestroySemaphore(m_dev, m_imgReady[i], nullptr);
+        vkDestroySemaphore(m_dev, m_renDone[i], nullptr);
+        vkDestroyFence(m_dev, m_fence[i], nullptr);
+    }
+
+    vkDestroyDevice(m_dev, nullptr);
+
+    if (m_dbg) {
+        auto fn = (PFN_vkDestroyDebugUtilsMessengerEXT)
+            vkGetInstanceProcAddr(m_inst, "vkDestroyDebugUtilsMessengerEXT");
+        if (fn) fn(m_inst, m_dbg, nullptr);
+    }
+
+    vkDestroySurfaceKHR(m_inst, m_surf, nullptr);
+    vkDestroyInstance(m_inst, nullptr);
+}
+
+void Renderer::initInstance() {
+    if (m_validation) {
+        uint32_t n = 0;
+        vkEnumerateInstanceLayerProperties(&n, nullptr);
+        std::vector<VkLayerProperties> layers(n);
+        vkEnumerateInstanceLayerProperties(&n, layers.data());
+        bool found = false;
+        for (auto& l : layers)
+            if (strcmp(l.layerName, "VK_LAYER_KHRONOS_validation") == 0) { found = true; break; }
+        if (!found) m_validation = false;
+    }
+
+    VkApplicationInfo ai{};
+    ai.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    ai.apiVersion = VK_API_VERSION_1_2;
+
+    uint32_t n = 0;
+    const char** exts = glfwGetRequiredInstanceExtensions(&n);
+    std::vector<const char*> extensions(exts, exts + n);
+    if (m_validation) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    VkInstanceCreateInfo ci{};
+    ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo        = &ai;
+    ci.enabledExtensionCount   = extensions.size();
+    ci.ppEnabledExtensionNames = extensions.data();
+    if (m_validation) {
+        ci.enabledLayerCount   = kLayers.size();
+        ci.ppEnabledLayerNames = kLayers.data();
+    }
+
+    if (vkCreateInstance(&ci, nullptr, &m_inst) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateInstance failed");
+
+    if (m_validation) {
+        VkDebugUtilsMessengerCreateInfoEXT dci{};
+        dci.sType           = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        dci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                              VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        dci.messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                              VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+        dci.pfnUserCallback = debugCb;
+        auto fn = (PFN_vkCreateDebugUtilsMessengerEXT)
+            vkGetInstanceProcAddr(m_inst, "vkCreateDebugUtilsMessengerEXT");
+        if (fn) fn(m_inst, &dci, nullptr, &m_dbg);
+    }
+}
+
+void Renderer::initSurface() {
+    if (glfwCreateWindowSurface(m_inst, m_win.handle(), nullptr, &m_surf) != VK_SUCCESS)
+        throw std::runtime_error("glfwCreateWindowSurface failed");
+}
+
+void Renderer::initDevice() {
+    uint32_t n = 0;
+    vkEnumeratePhysicalDevices(m_inst, &n, nullptr);
+    if (!n) throw std::runtime_error("no Vulkan GPU found");
+    std::vector<VkPhysicalDevice> devs(n);
+    vkEnumeratePhysicalDevices(m_inst, &n, devs.data());
+
+    for (auto d : devs)
+        if (deviceOk(d)) { m_gpu = d; break; }
+
+    if (!m_gpu) throw std::runtime_error("no suitable GPU");
+
+    auto qfi = findQFI(m_gpu);
+    m_gfxFam  = qfi.gfx.value();
+    m_presFam = qfi.present.value();
+
+    std::set<uint32_t> fams = {m_gfxFam, m_presFam};
+    float prio = 1.f;
+    std::vector<VkDeviceQueueCreateInfo> qcis;
+    for (uint32_t f : fams) {
+        VkDeviceQueueCreateInfo q{};
+        q.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        q.queueFamilyIndex = f;
+        q.queueCount = 1;
+        q.pQueuePriorities = &prio;
+        qcis.push_back(q);
+    }
+
+    VkPhysicalDeviceFeatures feat{};
+    feat.samplerAnisotropy = VK_TRUE;
+
+    VkDeviceCreateInfo ci{};
+    ci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    ci.queueCreateInfoCount    = qcis.size();
+    ci.pQueueCreateInfos       = qcis.data();
+    ci.enabledExtensionCount   = kDevExts.size();
+    ci.ppEnabledExtensionNames = kDevExts.data();
+    ci.pEnabledFeatures        = &feat;
+
+    if (m_validation) {
+        ci.enabledLayerCount   = kLayers.size();
+        ci.ppEnabledLayerNames = kLayers.data();
+    }
+
+    if (vkCreateDevice(m_gpu, &ci, nullptr, &m_dev) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateDevice failed");
+
+    vkGetDeviceQueue(m_dev, m_gfxFam, 0, &m_gfxQ);
+    vkGetDeviceQueue(m_dev, m_presFam, 0, &m_presQ);
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(m_gpu, &props);
+    std::cout << "gpu: " << props.deviceName << "\n";
+}
+
+
+void Renderer::initSwapchain() {
+    auto sc  = querySC(m_gpu);
+    auto fmt = pickFmt(sc.fmts);
+    auto mode= pickMode(sc.modes);
+    auto ext = pickExtent(sc.caps);
+
+    uint32_t count = sc.caps.minImageCount + 1;
+    if (sc.caps.maxImageCount > 0)
+        count = std::min(count, sc.caps.maxImageCount);
+
+    VkSwapchainCreateInfoKHR ci{};
+    ci.sType           = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    ci.surface         = m_surf;
+    ci.minImageCount   = count;
+    ci.imageFormat     = fmt.format;
+    ci.imageColorSpace = fmt.colorSpace;
+    ci.imageExtent     = ext;
+    ci.imageArrayLayers= 1;
+    ci.imageUsage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+    uint32_t fams[] = {m_gfxFam, m_presFam};
+    if (m_gfxFam != m_presFam) {
+        ci.imageSharingMode      = VK_SHARING_MODE_CONCURRENT;
+        ci.queueFamilyIndexCount = 2;
+        ci.pQueueFamilyIndices   = fams;
+    } else {
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+
+    ci.preTransform   = sc.caps.currentTransform;
+    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    ci.presentMode    = mode;
+    ci.clipped        = VK_TRUE;
+
+    if (vkCreateSwapchainKHR(m_dev, &ci, nullptr, &m_sc) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateSwapchainKHR failed");
+
+    vkGetSwapchainImagesKHR(m_dev, m_sc, &count, nullptr);
+    m_scImgs.resize(count);
+    vkGetSwapchainImagesKHR(m_dev, m_sc, &count, m_scImgs.data());
+    m_scFmt = fmt.format;
+    m_scExt = ext;
+}
+
+void Renderer::initImageViews() {
+    m_scViews.resize(m_scImgs.size());
+    for (size_t i = 0; i < m_scImgs.size(); ++i)
+        m_scViews[i] = mkView(m_scImgs[i], m_scFmt, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
+void Renderer::initRenderPass() {
+    VkAttachmentDescription col{};
+    col.format         = m_scFmt;
+    col.samples        = VK_SAMPLE_COUNT_1_BIT;
+    col.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    col.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+    col.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    col.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    col.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    col.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentDescription dep{};
+    dep.format         = depthFmt();
+    dep.samples        = VK_SAMPLE_COUNT_1_BIT;
+    dep.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    dep.storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    dep.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    dep.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    dep.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    dep.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount    = 1;
+    sub.pColorAttachments       = &colRef;
+    sub.pDepthStencilAttachment = &depRef;
+
+    VkSubpassDependency d{};
+    d.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    d.dstSubpass    = 0;
+    d.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    d.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    d.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    std::array<VkAttachmentDescription, 2> atts = {col, dep};
+    VkRenderPassCreateInfo ci{};
+    ci.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    ci.attachmentCount = atts.size();
+    ci.pAttachments    = atts.data();
+    ci.subpassCount    = 1;
+    ci.pSubpasses      = &sub;
+    ci.dependencyCount = 1;
+    ci.pDependencies   = &d;
+
+    if (vkCreateRenderPass(m_dev, &ci, nullptr, &m_rp) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateRenderPass failed");
+}
+
+void Renderer::initDepth() {
+    auto fmt = depthFmt();
+    mkImg(m_scExt.width, m_scExt.height, fmt, VK_IMAGE_TILING_OPTIMAL,
+          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_di, m_dm);
+    m_dv = mkView(m_di, fmt, VK_IMAGE_ASPECT_DEPTH_BIT);
+}
+
+void Renderer::initFramebuffers() {
+    m_fbs.resize(m_scViews.size());
+    for (size_t i = 0; i < m_scViews.size(); ++i) {
+        std::array<VkImageView, 2> atts = {m_scViews[i], m_dv};
+        VkFramebufferCreateInfo fi{};
+        fi.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fi.renderPass      = m_rp;
+        fi.attachmentCount = atts.size();
+        fi.pAttachments    = atts.data();
+        fi.width           = m_scExt.width;
+        fi.height          = m_scExt.height;
+        fi.layers          = 1;
+        vkCreateFramebuffer(m_dev, &fi, nullptr, &m_fbs[i]);
+    }
+}
+
+void Renderer::initCmdPool() {
+    VkCommandPoolCreateInfo ci{};
+    ci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    ci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    ci.queueFamilyIndex = m_gfxFam;
+    vkCreateCommandPool(m_dev, &ci, nullptr, &m_cp);
+}
+
+void Renderer::initDescLayout() {
+    VkDescriptorSetLayoutBinding ubo{};
+    ubo.binding         = 0;
+    ubo.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ubo.descriptorCount = 1;
+    ubo.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding tex{};
+    tex.binding         = 1;
+    tex.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    tex.descriptorCount = 1;
+    tex.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings = {ubo, tex};
+    VkDescriptorSetLayoutCreateInfo ci{};
+    ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.bindingCount = bindings.size();
+    ci.pBindings    = bindings.data();
+    vkCreateDescriptorSetLayout(m_dev, &ci, nullptr, &m_dsl);
+}
+
+void Renderer::initPipeline() {
+    auto vert = makeShader(readFile(SHADER_DIR "phong_vert.spv"));
+    auto frag = makeShader(readFile(SHADER_DIR "phong_frag.spv"));
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName  = "main";
+    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName  = "main";
+
+    auto bd = Vertex::binding();
+    auto ad = Vertex::attrs();
+    VkPipelineVertexInputStateCreateInfo vi{};
+    vi.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.vertexBindingDescriptionCount   = 1;
+    vi.pVertexBindingDescriptions      = &bd;
+    vi.vertexAttributeDescriptionCount = ad.size();
+    vi.pVertexAttributeDescriptions    = ad.data();
+
+    VkPipelineInputAssemblyStateCreateInfo ia{};
+    ia.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{};
+    vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1;
+    vp.scissorCount  = 1;
+
+    std::vector<VkDynamicState> dynStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{};
+    dyn.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = dynStates.size();
+    dyn.pDynamicStates    = dynStates.data();
+
+    VkPipelineRasterizationStateCreateInfo rs{};
+    rs.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode    = VK_CULL_MODE_BACK_BIT;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth   = 1.f;
+
+    VkPipelineMultisampleStateCreateInfo ms{};
+    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{};
+    ds.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable  = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp   = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
+                         VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo cb{};
+    cb.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1;
+    cb.pAttachments    = &cba;
+
+    VkPipelineLayoutCreateInfo pli{};
+    pli.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts    = &m_dsl;
+    vkCreatePipelineLayout(m_dev, &pli, nullptr, &m_pl);
+
+    VkGraphicsPipelineCreateInfo pci{};
+    pci.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pci.stageCount          = 2;
+    pci.pStages             = stages;
+    pci.pVertexInputState   = &vi;
+    pci.pInputAssemblyState = &ia;
+    pci.pViewportState      = &vp;
+    pci.pRasterizationState = &rs;
+    pci.pMultisampleState   = &ms;
+    pci.pDepthStencilState  = &ds;
+    pci.pColorBlendState    = &cb;
+    pci.pDynamicState       = &dyn;
+    pci.layout              = m_pl;
+    pci.renderPass          = m_rp;
+
+    if (vkCreateGraphicsPipelines(m_dev, VK_NULL_HANDLE, 1, &pci, nullptr, &m_pipe) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateGraphicsPipelines failed");
+
+    vkDestroyShaderModule(m_dev, vert, nullptr);
+    vkDestroyShaderModule(m_dev, frag, nullptr);
+}
+
+void Renderer::initWhiteTex() {
+    uint8_t px[4] = {255, 255, 255, 255};
+    VkBuffer sb; VkDeviceMemory sm;
+    mkBuf(4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+    void* p; vkMapMemory(m_dev, sm, 0, 4, 0, &p);
+    memcpy(p, px, 4);
+    vkUnmapMemory(m_dev, sm);
+
+    mkImg(1, 1, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_wImg, m_wMem);
+    transitionImg(m_wImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    cpBufToImg(sb, m_wImg, 1, 1);
+    transitionImg(m_wImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkDestroyBuffer(m_dev, sb, nullptr);
+    vkFreeMemory(m_dev, sm, nullptr);
+
+    m_wV = mkView(m_wImg, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkSamplerCreateInfo si{};
+    si.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter    = VK_FILTER_LINEAR;
+    si.minFilter    = VK_FILTER_LINEAR;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.anisotropyEnable = VK_TRUE;
+    si.maxAnisotropy    = 16.f;
+    si.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    vkCreateSampler(m_dev, &si, nullptr, &m_wS);
+}
+
+void Renderer::initUBOs() {
+    for (int i = 0; i < FRAMES; ++i) {
+        mkBuf(sizeof(UBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+              m_ub[i], m_ubm[i]);
+        vkMapMemory(m_dev, m_ubm[i], 0, sizeof(UBO), 0, &m_ubp[i]);
+    }
+}
+
+void Renderer::initDescPool() {
+    std::array<VkDescriptorPoolSize, 2> sz = {{
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         MAX_MESHES * FRAMES},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_MESHES * FRAMES},
+    }};
+
+    VkDescriptorPoolCreateInfo ci{};
+    ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    ci.poolSizeCount = sz.size();
+    ci.pPoolSizes    = sz.data();
+    ci.maxSets       = MAX_MESHES * FRAMES;
+    vkCreateDescriptorPool(m_dev, &ci, nullptr, &m_dp);
+}
+
+void Renderer::initCmdBuffers() {
+    m_cmds.resize(FRAMES);
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool        = m_cp;
+    ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = FRAMES;
+    vkAllocateCommandBuffers(m_dev, &ai, m_cmds.data());
+}
+
+void Renderer::initSync() {
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkFenceCreateInfo     fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (int i = 0; i < FRAMES; ++i) {
+        vkCreateSemaphore(m_dev, &si, nullptr, &m_imgReady[i]);
+        vkCreateSemaphore(m_dev, &si, nullptr, &m_renDone[i]);
+        vkCreateFence(m_dev, &fi, nullptr, &m_fence[i]);
+    }
+}
+
+void Renderer::allocMeshDescSets(GpuMesh& gm) {
+    std::vector<VkDescriptorSetLayout> layouts(FRAMES, m_dsl);
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool     = m_dp;
+    ai.descriptorSetCount = FRAMES;
+    ai.pSetLayouts        = layouts.data();
+    vkAllocateDescriptorSets(m_dev, &ai, gm.ds.data());
+}
+
+void Renderer::writeMeshDescSets(GpuMesh& gm) {
+    VkImageView  iv = gm.hasTex ? gm.texView    : m_wV;
+    VkSampler    is = gm.hasTex ? gm.texSampler : m_wS;
+
+    for (int i = 0; i < FRAMES; ++i) {
+        VkDescriptorBufferInfo bi{m_ub[i], 0, sizeof(UBO)};
+        VkDescriptorImageInfo  ii{is, iv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+        std::array<VkWriteDescriptorSet, 2> w{};
+        w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[0].dstSet          = gm.ds[i];
+        w[0].dstBinding      = 0;
+        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[0].descriptorCount = 1;
+        w[0].pBufferInfo     = &bi;
+
+        w[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[1].dstSet          = gm.ds[i];
+        w[1].dstBinding      = 1;
+        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[1].descriptorCount = 1;
+        w[1].pImageInfo      = &ii;
+
+        vkUpdateDescriptorSets(m_dev, w.size(), w.data(), 0, nullptr);
+    }
+}
+
+void Renderer::uploadTextureToMesh(GpuMesh& gm, const std::string& path) {
+    int w, h, ch;
+    stbi_uc* px = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+    if (!px) {
+        std::cerr << "failed to load texture: " << path << "\n";
+        return;
+    }
+    std::cout << "loaded texture: " << path << "\n";
+
+    VkDeviceSize sz = w * h * 4;
+    VkBuffer sb; VkDeviceMemory sm;
+    mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+    void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
+    memcpy(p, px, sz);
+    vkUnmapMemory(m_dev, sm);
+    stbi_image_free(px);
+
+    mkImg(w, h, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gm.texImg, gm.texMem);
+    transitionImg(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    cpBufToImg(sb, gm.texImg, w, h);
+    transitionImg(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkDestroyBuffer(m_dev, sb, nullptr);
+    vkFreeMemory(m_dev, sm, nullptr);
+
+    gm.texView = mkView(gm.texImg, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    VkSamplerCreateInfo si{};
+    si.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter        = VK_FILTER_LINEAR;
+    si.minFilter        = VK_FILTER_LINEAR;
+    si.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.anisotropyEnable = VK_TRUE;
+    si.maxAnisotropy    = 16.f;
+    si.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    vkCreateSampler(m_dev, &si, nullptr, &gm.texSampler);
+
+    gm.hasTex = true;
+}
+
+void Renderer::uploadMesh(const MeshData& mesh) {
+    GpuMesh gm;
+    gm.count = mesh.indices.size();
+
+    auto upload = [&](const void* data, VkDeviceSize sz, VkBufferUsageFlags usage,
+                      VkBuffer& buf, VkDeviceMemory& mem) {
+        VkBuffer sb; VkDeviceMemory sm;
+        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, sb, sm);
+        void* p; vkMapMemory(m_dev, sm, 0, sz, 0, &p);
+        memcpy(p, data, sz);
+        vkUnmapMemory(m_dev, sm);
+        mkBuf(sz, VK_BUFFER_USAGE_TRANSFER_DST_BIT|usage,
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buf, mem);
+        cpBuf(sb, buf, sz);
+        vkDestroyBuffer(m_dev, sb, nullptr);
+        vkFreeMemory(m_dev, sm, nullptr);
+    };
+
+    upload(mesh.vertices.data(), sizeof(Vertex)*mesh.vertices.size(),
+           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, gm.vb, gm.vm);
+    upload(mesh.indices.data(), sizeof(uint32_t)*mesh.indices.size(),
+           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, gm.ib, gm.im);
+
+    if (!mesh.texturePath.empty() && std::filesystem::exists(mesh.texturePath))
+        uploadTextureToMesh(gm, mesh.texturePath);
+
+    allocMeshDescSets(gm);
+    writeMeshDescSets(gm);
+
+    m_meshes.push_back(std::move(gm));
+}
+
+void Renderer::clearMeshes() {
+    vkDeviceWaitIdle(m_dev);
+    for (auto& gm : m_meshes) {
+        vkDestroyBuffer(m_dev, gm.vb, nullptr); vkFreeMemory(m_dev, gm.vm, nullptr);
+        vkDestroyBuffer(m_dev, gm.ib, nullptr); vkFreeMemory(m_dev, gm.im, nullptr);
+        if (gm.hasTex) {
+            vkDestroySampler(m_dev, gm.texSampler, nullptr);
+            vkDestroyImageView(m_dev, gm.texView, nullptr);
+            vkDestroyImage(m_dev, gm.texImg, nullptr);
+            vkFreeMemory(m_dev, gm.texMem, nullptr);
+        }
+    }
+    m_meshes.clear();
+}
+
+bool Renderer::beginFrame() {
+    vkWaitForFences(m_dev, 1, &m_fence[m_frame], VK_TRUE, UINT64_MAX);
+
+    VkResult r = vkAcquireNextImageKHR(m_dev, m_sc, UINT64_MAX,
+                                        m_imgReady[m_frame], VK_NULL_HANDLE, &m_imgIdx);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { recreateSwapchain(); return false; }
+
+    vkResetFences(m_dev, 1, &m_fence[m_frame]);
+
+    auto cmd = m_cmds[m_frame];
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(cmd, &bi);
+
+    std::array<VkClearValue, 2> clear{};
+    clear[0].color        = {{0.05f, 0.05f, 0.05f, 1.f}};
+    clear[1].depthStencil = {1.f, 0};
+
+    VkRenderPassBeginInfo rpi{};
+    rpi.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpi.renderPass        = m_rp;
+    rpi.framebuffer       = m_fbs[m_imgIdx];
+    rpi.renderArea.extent = m_scExt;
+    rpi.clearValueCount   = clear.size();
+    rpi.pClearValues      = clear.data();
+    vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipe);
+
+    VkViewport vp{0, 0, (float)m_scExt.width, (float)m_scExt.height, 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc{{0,0}, m_scExt};
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    m_recording = true;
+    return true;
+}
+
+void Renderer::draw(int idx, const glm::mat4& model) {
+    if (!m_recording || idx < 0 || idx >= (int)m_meshes.size()) return;
+    updateUBO(m_frame, model);
+
+    auto& gm  = m_meshes[idx];
+    auto  cmd = m_cmds[m_frame];
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                             m_pl, 0, 1, &gm.ds[m_frame], 0, nullptr);
+
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vb, &off);
+    vkCmdBindIndexBuffer(cmd, gm.ib, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd, gm.count, 1, 0, 0, 0);
+}
+
+void Renderer::endFrame() {
+    if (!m_recording) return;
+    m_recording = false;
+
+    auto cmd = m_cmds[m_frame];
+    vkCmdEndRenderPass(cmd);
+    vkEndCommandBuffer(cmd);
+
+    VkPipelineStageFlags wait = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si{};
+    si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount   = 1;
+    si.pWaitSemaphores      = &m_imgReady[m_frame];
+    si.pWaitDstStageMask    = &wait;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = &m_renDone[m_frame];
+    vkQueueSubmit(m_gfxQ, 1, &si, m_fence[m_frame]);
+
+    VkPresentInfoKHR pi{};
+    pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores    = &m_renDone[m_frame];
+    pi.swapchainCount     = 1;
+    pi.pSwapchains        = &m_sc;
+    pi.pImageIndices      = &m_imgIdx;
+
+    VkResult r = vkQueuePresentKHR(m_presQ, &pi);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || m_win.resized()) {
+        m_win.clearResize();
+        recreateSwapchain();
+    }
+
+    m_frame = (m_frame + 1) % FRAMES;
+}
+
+void Renderer::setCamera(glm::vec3 eye, glm::vec3 target, glm::vec3 up) {
+    m_ubo.view    = glm::lookAt(eye, target, up);
+    m_ubo.viewPos = glm::vec4(eye, 0);
+}
+
+void Renderer::setLight(glm::vec3 pos, glm::vec3 color, float specPow) {
+    m_ubo.lightPos   = glm::vec4(pos, 0);
+    m_ubo.lightColor = glm::vec4(color, specPow);
+}
+
+void Renderer::setUV(glm::vec2 offset, glm::vec2 scale) {
+    m_ubo.uvOffset = offset;
+    m_ubo.uvScale  = scale;
+}
+
+
+void Renderer::setAnim(int mode, float time) {
+    m_ubo.animMode = static_cast<float>(mode);
+    m_ubo.time     = time;
+}
+
+void Renderer::updateUBO(uint32_t frame, const glm::mat4& model) {
+    m_ubo.model = model;
+    m_ubo.proj  = glm::perspective(glm::radians(90.f), m_win.aspect(), 0.01f, 1000.f);
+    m_ubo.proj[1][1] *= -1;
+    memcpy(m_ubp[frame], &m_ubo, sizeof(m_ubo));
+}
+
+void Renderer::destroySwapchain() {
+    vkDestroyImageView(m_dev, m_dv, nullptr);
+    vkDestroyImage(m_dev, m_di, nullptr);
+    vkFreeMemory(m_dev, m_dm, nullptr);
+    for (auto fb : m_fbs) vkDestroyFramebuffer(m_dev, fb, nullptr);
+    for (auto iv : m_scViews) vkDestroyImageView(m_dev, iv, nullptr);
+    vkDestroySwapchainKHR(m_dev, m_sc, nullptr);
+    m_fbs.clear(); m_scViews.clear(); m_scImgs.clear();
+}
+
+void Renderer::recreateSwapchain() {
+    int w = 0, h = 0;
+    while (!w || !h) { glfwGetFramebufferSize(m_win.handle(), &w, &h); glfwWaitEvents(); }
+    vkDeviceWaitIdle(m_dev);
+    destroySwapchain();
+    initSwapchain(); initImageViews(); initDepth(); initFramebuffers();
+}
+
+Renderer::QFI Renderer::findQFI(VkPhysicalDevice dev) {
+    QFI qi;
+    uint32_t n; vkGetPhysicalDeviceQueueFamilyProperties(dev, &n, nullptr);
+    std::vector<VkQueueFamilyProperties> fams(n);
+    vkGetPhysicalDeviceQueueFamilyProperties(dev, &n, fams.data());
+    for (uint32_t i = 0; i < n; ++i) {
+        if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) qi.gfx = i;
+        VkBool32 ps = false;
+        vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, m_surf, &ps);
+        if (ps) qi.present = i;
+        if (qi.ok()) break;
+    }
+    return qi;
+}
+
+Renderer::SCSupport Renderer::querySC(VkPhysicalDevice dev) {
+    SCSupport s;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(dev, m_surf, &s.caps);
+    uint32_t n;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(dev, m_surf, &n, nullptr);
+    s.fmts.resize(n); vkGetPhysicalDeviceSurfaceFormatsKHR(dev, m_surf, &n, s.fmts.data());
+    vkGetPhysicalDeviceSurfacePresentModesKHR(dev, m_surf, &n, nullptr);
+    s.modes.resize(n); vkGetPhysicalDeviceSurfacePresentModesKHR(dev, m_surf, &n, s.modes.data());
+    return s;
+}
+
+bool Renderer::deviceOk(VkPhysicalDevice dev) {
+    if (!findQFI(dev).ok()) return false;
+    uint32_t n; vkEnumerateDeviceExtensionProperties(dev, nullptr, &n, nullptr);
+    std::vector<VkExtensionProperties> exts(n);
+    vkEnumerateDeviceExtensionProperties(dev, nullptr, &n, exts.data());
+    for (auto& req : kDevExts) {
+        bool found = false;
+        for (auto& e : exts) if (!strcmp(e.extensionName, req)) { found = true; break; }
+        if (!found) return false;
+    }
+    auto sc = querySC(dev);
+    if (sc.fmts.empty() || sc.modes.empty()) return false;
+    VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(dev, &f);
+    return f.samplerAnisotropy;
+}
+
+VkSurfaceFormatKHR Renderer::pickFmt(const std::vector<VkSurfaceFormatKHR>& fmts) {
+    for (auto& f : fmts)
+        if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+            return f;
+    return fmts[0];
+}
+
+VkPresentModeKHR Renderer::pickMode(const std::vector<VkPresentModeKHR>& modes) {
+    for (auto m : modes) if (m == VK_PRESENT_MODE_MAILBOX_KHR) return m;
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+VkExtent2D Renderer::pickExtent(const VkSurfaceCapabilitiesKHR& caps) {
+    if (caps.currentExtent.width != UINT32_MAX) return caps.currentExtent;
+    int w, h; glfwGetFramebufferSize(m_win.handle(), &w, &h);
+    return {
+        std::clamp((uint32_t)w, caps.minImageExtent.width,  caps.maxImageExtent.width),
+        std::clamp((uint32_t)h, caps.minImageExtent.height, caps.maxImageExtent.height),
+    };
+}
+
+VkFormat Renderer::depthFmt() {
+    return findFmt({VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
+                   VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+}
+
+VkFormat Renderer::findFmt(const std::vector<VkFormat>& cands, VkImageTiling tiling, VkFormatFeatureFlags feat) {
+    for (auto f : cands) {
+        VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(m_gpu, f, &p);
+        if (tiling == VK_IMAGE_TILING_OPTIMAL && (p.optimalTilingFeatures & feat) == feat) return f;
+    }
+    throw std::runtime_error("no supported format");
+}
+
+uint32_t Renderer::memType(uint32_t filter, VkMemoryPropertyFlags props) {
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(m_gpu, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((filter & (1<<i)) && (mp.memoryTypes[i].propertyFlags & props) == props) return i;
+    throw std::runtime_error("no suitable memory type");
+}
+
+VkShaderModule Renderer::makeShader(const std::vector<char>& code) {
+    VkShaderModuleCreateInfo ci{};
+    ci.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.codeSize = code.size();
+    ci.pCode    = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModule m;
+    if (vkCreateShaderModule(m_dev, &ci, nullptr, &m) != VK_SUCCESS)
+        throw std::runtime_error("vkCreateShaderModule failed");
+    return m;
+}
+
+std::vector<char> Renderer::readFile(const std::string& path) {
+    std::ifstream f(path, std::ios::ate|std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open: " + path);
+    size_t sz = f.tellg();
+    std::vector<char> buf(sz);
+    f.seekg(0); f.read(buf.data(), sz);
+    return buf;
+}
+
+void Renderer::mkBuf(VkDeviceSize sz, VkBufferUsageFlags usage, VkMemoryPropertyFlags props,
+                     VkBuffer& buf, VkDeviceMemory& mem) {
+    VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    ci.size = sz; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(m_dev, &ci, nullptr, &buf);
+    VkMemoryRequirements req; vkGetBufferMemoryRequirements(m_dev, buf, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size; ai.memoryTypeIndex = memType(req.memoryTypeBits, props);
+    vkAllocateMemory(m_dev, &ai, nullptr, &mem);
+    vkBindBufferMemory(m_dev, buf, mem, 0);
+}
+
+void Renderer::cpBuf(VkBuffer src, VkBuffer dst, VkDeviceSize sz) {
+    auto cmd = beginOnce();
+    VkBufferCopy c{0, 0, sz};
+    vkCmdCopyBuffer(cmd, src, dst, 1, &c);
+    endOnce(cmd);
+}
+
+void Renderer::mkImg(uint32_t w, uint32_t h, VkFormat fmt, VkImageTiling tiling,
+                     VkImageUsageFlags usage, VkMemoryPropertyFlags props,
+                     VkImage& img, VkDeviceMemory& mem) {
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent = {w,h,1};
+    ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling = tiling; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateImage(m_dev, &ci, nullptr, &img);
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(m_dev, img, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size; ai.memoryTypeIndex = memType(req.memoryTypeBits, props);
+    vkAllocateMemory(m_dev, &ai, nullptr, &mem);
+    vkBindImageMemory(m_dev, img, mem, 0);
+}
+
+VkImageView Renderer::mkView(VkImage img, VkFormat fmt, VkImageAspectFlags aspect) {
+    VkImageViewCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    ci.image = img; ci.viewType = VK_IMAGE_VIEW_TYPE_2D; ci.format = fmt;
+    ci.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkImageView v; vkCreateImageView(m_dev, &ci, nullptr, &v); return v;
+}
+
+void Renderer::transitionImg(VkImage img, VkFormat, VkImageLayout from, VkImageLayout to) {
+    auto cmd = beginOnce();
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.oldLayout = from; b.newLayout = to;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkPipelineStageFlags src, dst;
+    if (from == VK_IMAGE_LAYOUT_UNDEFINED) {
+        b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        src = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT; dst = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else {
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        src = VK_PIPELINE_STAGE_TRANSFER_BIT; dst = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    vkCmdPipelineBarrier(cmd, src, dst, 0, 0, nullptr, 0, nullptr, 1, &b);
+    endOnce(cmd);
+}
+
+void Renderer::cpBufToImg(VkBuffer buf, VkImage img, uint32_t w, uint32_t h) {
+    auto cmd = beginOnce();
+    VkBufferImageCopy r{};
+    r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageExtent = {w, h, 1};
+    vkCmdCopyBufferToImage(cmd, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+    endOnce(cmd);
+}
+
+VkCommandBuffer Renderer::beginOnce() {
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = m_cp; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+    VkCommandBuffer cmd; vkAllocateCommandBuffers(m_dev, &ai, &cmd);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    return cmd;
+}
+
+void Renderer::endOnce(VkCommandBuffer cmd) {
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+    vkQueueSubmit(m_gfxQ, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_gfxQ);
+    vkFreeCommandBuffers(m_dev, m_cp, 1, &cmd);
+}
+
+//filename: ./src/Renderer.h
+#pragma once
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include "Types.h"
+#include "Window.h"
+#include <vector>
+#include <array>
+#include <optional>
+#include <string>
+
+class Renderer {
+public:
+    explicit Renderer(Window& window);
+    ~Renderer();
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
+    void uploadMesh(const MeshData& mesh);
+    void clearMeshes();
+
+    bool beginFrame();
+    void draw(int meshIdx, const glm::mat4& model);
+    void endFrame();
+
+    void setCamera(glm::vec3 eye, glm::vec3 target, glm::vec3 up);
+    void setLight(glm::vec3 pos, glm::vec3 color, float specPow = 64.f);
+    void setUV(glm::vec2 offset, glm::vec2 scale);
+    void setAnim(int mode, float time);
+
+    int meshCount() const { return (int)m_meshes.size(); }
+
+private:
+    struct QFI {
+        std::optional<uint32_t> gfx, present;
+        bool ok() const { return gfx && present; }
+    };
+    struct SCSupport {
+        VkSurfaceCapabilitiesKHR caps{};
+        std::vector<VkSurfaceFormatKHR> fmts;
+        std::vector<VkPresentModeKHR>   modes;
+    };
+    struct GpuMesh {
+        VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+        VkDeviceMemory vm = VK_NULL_HANDLE, im = VK_NULL_HANDLE;
+        uint32_t count = 0;
+
+        VkImage        texImg  = VK_NULL_HANDLE;
+        VkDeviceMemory texMem  = VK_NULL_HANDLE;
+        VkImageView    texView = VK_NULL_HANDLE;
+        VkSampler      texSampler = VK_NULL_HANDLE;
+        bool           hasTex  = false;
+
+        std::array<VkDescriptorSet, 2> ds{};
+    };
+
+    static constexpr int FRAMES = 2;
+    static constexpr int MAX_MESHES = 64;
+
+    void initInstance();
+    void initSurface();
+    void initDevice();
+    void initSwapchain();
+    void initImageViews();
+    void initRenderPass();
+    void initDepth();
+    void initFramebuffers();
+    void initCmdPool();
+    void initDescLayout();
+    void initPipeline();
+    void initWhiteTex();
+    void initUBOs();
+    void initDescPool();
+    void initCmdBuffers();
+    void initSync();
+
+    void recreateSwapchain();
+    void destroySwapchain();
+
+    QFI       findQFI(VkPhysicalDevice);
+    SCSupport querySC(VkPhysicalDevice);
+    bool      deviceOk(VkPhysicalDevice);
+
+    VkSurfaceFormatKHR pickFmt(const std::vector<VkSurfaceFormatKHR>&);
+    VkPresentModeKHR   pickMode(const std::vector<VkPresentModeKHR>&);
+    VkExtent2D         pickExtent(const VkSurfaceCapabilitiesKHR&);
+    VkFormat           depthFmt();
+    VkFormat           findFmt(const std::vector<VkFormat>&, VkImageTiling, VkFormatFeatureFlags);
+    uint32_t           memType(uint32_t filter, VkMemoryPropertyFlags);
+    VkShaderModule     makeShader(const std::vector<char>&);
+    std::vector<char>  readFile(const std::string&);
+
+    void mkBuf(VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags, VkBuffer&, VkDeviceMemory&);
+    void cpBuf(VkBuffer, VkBuffer, VkDeviceSize);
+    void mkImg(uint32_t, uint32_t, VkFormat, VkImageTiling, VkImageUsageFlags, VkMemoryPropertyFlags, VkImage&, VkDeviceMemory&);
+    VkImageView mkView(VkImage, VkFormat, VkImageAspectFlags);
+    void transitionImg(VkImage, VkFormat, VkImageLayout, VkImageLayout);
+    void cpBufToImg(VkBuffer, VkImage, uint32_t, uint32_t);
+    VkCommandBuffer beginOnce();
+    void            endOnce(VkCommandBuffer);
+
+    void allocMeshDescSets(GpuMesh& gm);
+    void writeMeshDescSets(GpuMesh& gm);
+    void uploadTextureToMesh(GpuMesh& gm, const std::string& path);
+    void updateUBO(uint32_t frame, const glm::mat4& model);
+
+    Window& m_win;
+
+    VkInstance               m_inst   = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT m_dbg    = VK_NULL_HANDLE;
+    VkSurfaceKHR             m_surf   = VK_NULL_HANDLE;
+    VkPhysicalDevice         m_gpu    = VK_NULL_HANDLE;
+    VkDevice                 m_dev    = VK_NULL_HANDLE;
+    VkQueue                  m_gfxQ   = VK_NULL_HANDLE;
+    VkQueue                  m_presQ  = VK_NULL_HANDLE;
+    uint32_t                 m_gfxFam = 0;
+    uint32_t                 m_presFam= 0;
+
+    VkSwapchainKHR           m_sc     = VK_NULL_HANDLE;
+    std::vector<VkImage>     m_scImgs;
+    VkFormat                 m_scFmt  = VK_FORMAT_UNDEFINED;
+    VkExtent2D               m_scExt  {};
+    std::vector<VkImageView> m_scViews;
+
+    VkRenderPass               m_rp   = VK_NULL_HANDLE;
+    VkImage                    m_di   = VK_NULL_HANDLE;
+    VkDeviceMemory             m_dm   = VK_NULL_HANDLE;
+    VkImageView                m_dv   = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> m_fbs;
+
+    VkDescriptorSetLayout m_dsl  = VK_NULL_HANDLE;
+    VkPipelineLayout      m_pl   = VK_NULL_HANDLE;
+    VkPipeline            m_pipe = VK_NULL_HANDLE;
+
+    VkCommandPool                m_cp = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> m_cmds;
+
+    std::array<VkBuffer,       FRAMES> m_ub  {};
+    std::array<VkDeviceMemory, FRAMES> m_ubm {};
+    std::array<void*,          FRAMES> m_ubp {};
+
+    VkDescriptorPool m_dp = VK_NULL_HANDLE;
+
+    VkImage        m_wImg = VK_NULL_HANDLE;
+    VkDeviceMemory m_wMem = VK_NULL_HANDLE;
+    VkImageView    m_wV   = VK_NULL_HANDLE;
+    VkSampler      m_wS   = VK_NULL_HANDLE;
+
+    std::vector<GpuMesh> m_meshes;
+
+    std::array<VkSemaphore, FRAMES> m_imgReady{};
+    std::array<VkSemaphore, FRAMES> m_renDone{};
+    std::array<VkFence,     FRAMES> m_fence{};
+
+    UBO      m_ubo{};
+    uint32_t m_frame  = 0;
+    uint32_t m_imgIdx = 0;
+    bool     m_recording = false;
+    bool     m_validation = false;
+};
+
+//filename: ./src/RenderingSystem.cpp
+#include "RenderingSystem.h"
+#include <array>
+#include <cstring>
+
+struct GeomPC {
+    glm::mat4 model;
+    glm::vec4 color;
+    int isUnlit;
+    float dispScale;
+    int pad[2];
+};
+
+struct ShadowPC {
+    glm::mat4 model;
+    glm::mat4 lightSpace;
+};
+
+void RenderingSystem::init(Engine& engine) {
+    auto ext = engine.getSwapExtent();
+    gbuffer.init(engine, ext.width, ext.height);
+    createShadowResources_(engine);
+    createShadowPipeline_(engine);
+    createGeomPipeline_(engine);
+    createLightRenderPass_(engine);
+    createLightPipeline_(engine);
+    createFramebuffers_(engine);
+    createDescriptors_(engine);
+    updateLightDescSets_(engine);
+}
+
+void RenderingSystem::cleanup(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    vkDeviceWaitIdle(dev);
+    cleanupFramebuffers_(dev);
+    vkDestroyRenderPass(dev, lightRenderPass, nullptr);
+    vkDestroyPipeline(dev, lightPipeline, nullptr);
+    vkDestroyPipelineLayout(dev, lightPipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(dev, lightDescLayout, nullptr);
+    vkDestroyDescriptorPool(dev, lightDescPool, nullptr);
+    vkDestroyPipeline(dev, geomPipeline, nullptr);
+    vkDestroyPipelineLayout(dev, geomPipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(dev, geomUBOLayout, nullptr);
+    vkDestroyDescriptorPool(dev, geomDescPool, nullptr);
+    vkDestroyPipeline(dev, shadowPipeline, nullptr);
+    vkDestroyPipelineLayout(dev, shadowPipelineLayout, nullptr);
+    vkDestroyRenderPass(dev, shadowRenderPass, nullptr);
+    vkDestroyImageView(dev, shadowArrayView, nullptr);
+    for(auto v : shadowLayerViews) vkDestroyImageView(dev, v, nullptr);
+    for(auto f : shadowFramebuffers) vkDestroyFramebuffer(dev, f, nullptr);
+    vkDestroyImage(dev, shadowImage, nullptr);
+    vkFreeMemory(dev, shadowMemory, nullptr);
+    vkDestroySampler(dev, shadowSampler, nullptr);
+    for (int i = 0; i < Engine::MAX_FRAMES; ++i) {
+        vkDestroyBuffer(dev, geomUBOBufs[i], nullptr); vkFreeMemory(dev, geomUBOMems[i], nullptr);
+        vkDestroyBuffer(dev, lightUBOBufs[i], nullptr); vkFreeMemory(dev, lightUBOMems[i], nullptr);
+    }
+    gbuffer.cleanup(dev);
+}
+
+void RenderingSystem::onResize(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    auto ext = engine.getSwapExtent();
+    cleanupFramebuffers_(dev);
+    gbuffer.recreate(engine, ext.width, ext.height);
+    createFramebuffers_(engine);
+    updateLightDescSets_(engine);
+}
+
+void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<SceneObject>& objects, Engine& engine) {
+    auto ext = engine.getSwapExtent();
+
+    GeomUBO gubo{};
+    gubo.view = camera.view();
+    gubo.proj = camera.projection((float)ext.width / (float)ext.height);
+    gubo.cameraPos = glm::vec4(camera.position, 1.0f);
+    memcpy(geomUBOMapped[frameIndex], &gubo, sizeof(GeomUBO));
+
+    LightsUBO lubo{};
+    lubo.viewPos = glm::vec4(camera.position, 1.0f);
+    lubo.ambientColor = glm::vec4(0.08f, 0.08f, 0.10f, 1.0f);
+    lubo.invViewProj = glm::inverse(gubo.proj * gubo.view);
+
+    int cnt = std::min((int)pendingLights.size(), MAX_LIGHTS);
+    lubo.countPad.x = cnt;
+    for (int i = 0; i < cnt; ++i) lubo.lights[i] = pendingLights[i];
+    memcpy(lightUBOMapped[frameIndex], &lubo, sizeof(LightsUBO));
+
+    for (int i = 0; i < cnt; ++i) {
+        if (pendingLights[i].params2.x > 0.5f) {
+            int layer = (int)pendingLights[i].params2.y;
+            VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+            rpi.renderPass = shadowRenderPass;
+            rpi.framebuffer = shadowFramebuffers[layer];
+            rpi.renderArea.extent = {2048, 2048};
+            VkClearValue cv; cv.depthStencil = {1.0f, 0};
+            rpi.clearValueCount = 1; rpi.pClearValues = &cv;
+            vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+            VkViewport vp{0, 0, 2048.0f, 2048.0f, 0.0f, 1.0f}; VkRect2D sc{{0, 0}, {2048, 2048}};
+            vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
+            for (const auto& obj : objects) {
+                if (obj.unlit) continue;
+                for (const auto& sm : obj.submeshes) {
+                    if (!sm.mesh.valid()) continue;
+                    ShadowPC spc{};
+                    spc.model = obj.transform; spc.lightSpace = pendingLights[i].lightSpace;
+                    vkCmdPushConstants(cmd, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &spc);
+                    engine.bindAndDrawMesh_(cmd, sm.mesh);
+                }
+            }
+            vkCmdEndRenderPass(cmd);
+        }
+    }
+
+    std::array<VkClearValue, 3> clears{};
+    clears[0].color = {0,0,0,0};
+    clears[1].color = {0,0,0,0};
+    clears[2].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rpi.renderPass = gbuffer.getRenderPass(); rpi.framebuffer = gbuffer.getFramebuffer();
+    rpi.renderArea.extent = ext; rpi.clearValueCount = (uint32_t)clears.size(); rpi.pClearValues = clears.data();
+    vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipeline);
+    VkViewport vp{0,0,(float)ext.width,(float)ext.height, 0.0f, 1.0f}; VkRect2D sc{{0,0}, ext};
+    vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 0, 1, &geomDescSets[frameIndex], 0, nullptr);
+
+    for (const auto& obj : objects) {
+        for (const auto& sm : obj.submeshes) {
+            if (!sm.mesh.valid()) continue;
+            GeomPC gpc{};
+            gpc.model = obj.transform;
+            gpc.color = obj.unlitColor;
+            gpc.isUnlit = obj.unlit ? 1 : 0;
+            gpc.dispScale = sm.dispScale; // <--- БЕРЁМ ИЗ SUBMESH
+
+            vkCmdPushConstants(cmd, geomPipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                0, sizeof(GeomPC), &gpc);
+
+            if (!obj.unlit && sm.matSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &sm.matSet, 0, nullptr);
+            }
+            engine.bindAndDrawMesh_(cmd, sm.mesh);
+        }
+    }
+    vkCmdEndRenderPass(cmd);
+
+    std::array<VkClearValue, 1> lightClears{};
+    lightClears[0].color = {0.02f, 0.02f, 0.05f, 1.0f};
+    VkRenderPassBeginInfo lrpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    lrpi.renderPass = lightRenderPass; lrpi.framebuffer = lightFramebuffers[imageIndex];
+    lrpi.renderArea.extent = ext; lrpi.clearValueCount = 1; lrpi.pClearValues = lightClears.data();
+    vkCmdBeginRenderPass(cmd, &lrpi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lightPipeline);
+    vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lightPipelineLayout, 0, 1, &lightDescSets[frameIndex], 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+}
+
+void RenderingSystem::createShadowResources_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    VkFormat depthFmt = engine.findDepthFormat();
+    engine.createImage(2048, 2048, 4, depthFmt, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, shadowImage, shadowMemory);
+    engine.transitionLayout(shadowImage, 4, depthFmt, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    shadowArrayView = engine.createImageView(shadowImage, depthFmt, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 4, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+    shadowLayerViews.resize(4);
+    for(int i=0; i<4; ++i) shadowLayerViews[i] = engine.createImageView(shadowImage, depthFmt, VK_IMAGE_ASPECT_DEPTH_BIT, i, 1, VK_IMAGE_VIEW_TYPE_2D);
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR; si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(dev, &si, nullptr, &shadowSampler);
+    VkAttachmentDescription att{};
+    att.format = depthFmt; att.samples = VK_SAMPLE_COUNT_1_BIT; att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.pDepthStencilAttachment = &ref;
+    VkSubpassDependency dep1{}; dep1.srcSubpass = VK_SUBPASS_EXTERNAL; dep1.dstSubpass = 0; dep1.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; dep1.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT; dep1.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; dep1.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    VkSubpassDependency dep2{}; dep2.srcSubpass = 0; dep2.dstSubpass = VK_SUBPASS_EXTERNAL; dep2.srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; dep2.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; dep2.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkSubpassDependency deps[] = {dep1, dep2};
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1; rpci.pAttachments = &att; rpci.subpassCount = 1; rpci.pSubpasses = &subpass; rpci.dependencyCount = 2; rpci.pDependencies = deps;
+    vkCreateRenderPass(dev, &rpci, nullptr, &shadowRenderPass);
+    shadowFramebuffers.resize(4);
+    for(int i=0; i<4; ++i) {
+        VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fci.renderPass = shadowRenderPass; fci.attachmentCount = 1; fci.pAttachments = &shadowLayerViews[i]; fci.width = 2048; fci.height = 2048; fci.layers = 1;
+        vkCreateFramebuffer(dev, &fci, nullptr, &shadowFramebuffers[i]);
+    }
+}
+
+void RenderingSystem::createShadowPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+    vkCreatePipelineLayout(dev, &plci, nullptr, &shadowPipelineLayout);
+    auto vsStage = loadShader_(engine, "shaders/shadows.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto bindDesc = Vertex::getBindingDesc();
+    auto attrDescs = Vertex::getAttrDescs();
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bindDesc;
+    vi.vertexAttributeDescriptionCount = 1; vi.pVertexAttributeDescriptions = &attrDescs[0];
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vpState.viewportCount = 1; vpState.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rast{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rast.polygonMode = VK_POLYGON_MODE_FILL; rast.cullMode = VK_CULL_MODE_NONE; rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rast.lineWidth = 1.0f; rast.depthBiasEnable = VK_TRUE; rast.depthBiasConstantFactor = 1.25f; rast.depthBiasSlopeFactor = 1.75f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynState.dynamicStateCount = 2; dynState.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 1; gci.pStages = &vsStage; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vpState; gci.pRasterizationState = &rast; gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds; gci.pDynamicState = &dynState; gci.layout = shadowPipelineLayout; gci.renderPass = shadowRenderPass;
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &shadowPipeline);
+    vkDestroyShaderModule(dev, vsStage.module, nullptr);
+}
+
+void RenderingSystem::createGeomPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    VkDescriptorSetLayoutBinding uboBinding{};
+    uboBinding.binding = 0; uboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; uboBinding.descriptorCount = 1;
+    uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lci.bindingCount = 1; lci.pBindings = &uboBinding;
+    vkCreateDescriptorSetLayout(dev, &lci, nullptr, &geomUBOLayout);
+
+    // Подключаем контроль тесселяции
+    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 0, sizeof(GeomPC)};
+    VkDescriptorSetLayout setLayouts[] = {geomUBOLayout, engine.getMaterialLayout()};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 2; plci.pSetLayouts = setLayouts; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+    vkCreatePipelineLayout(dev, &plci, nullptr, &geomPipelineLayout);
+
+    auto vsStage = loadShader_(engine, "shaders/gbuffer.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto tcsStage = loadShader_(engine, "shaders/gbuffer.tesc.spv", VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+    auto tesStage = loadShader_(engine, "shaders/gbuffer.tese.spv", VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
+    auto fsStage = loadShader_(engine, "shaders/gbuffer.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkPipelineShaderStageCreateInfo stages[] = {vsStage, tcsStage, tesStage, fsStage};
+
+    auto bindDesc = Vertex::getBindingDesc(); auto attrDesc = Vertex::getAttrDescs();
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bindDesc; vi.vertexAttributeDescriptionCount = (uint32_t)attrDesc.size(); vi.pVertexAttributeDescriptions = attrDesc.data();
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+
+    VkPipelineTessellationStateCreateInfo tessState{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
+    tessState.patchControlPoints = 3;
+
+    VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vpState.viewportCount = vpState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rast{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rast.polygonMode = VK_POLYGON_MODE_FILL; rast.cullMode = VK_CULL_MODE_NONE; rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rast.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    std::array<VkPipelineColorBlendAttachmentState, GBuffer::NUM_ATTACHMENTS> cbAtts{};
+    for (auto& att : cbAtts) { att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT; att.blendEnable = VK_FALSE; }
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = (uint32_t)cbAtts.size(); cb.pAttachments = cbAtts.data();
+
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynState.dynamicStateCount = 2; dynState.pDynamicStates = dyn;
+
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 4; gci.pStages = stages;
+    gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
+    gci.pTessellationState = &tessState;
+    gci.pViewportState = &vpState; gci.pRasterizationState = &rast;
+    gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds;
+    gci.pColorBlendState = &cb; gci.pDynamicState = &dynState;
+    gci.layout = geomPipelineLayout; gci.renderPass = gbuffer.getRenderPass();
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &geomPipeline);
+
+    vkDestroyShaderModule(dev, vsStage.module, nullptr);
+    vkDestroyShaderModule(dev, tcsStage.module, nullptr);
+    vkDestroyShaderModule(dev, tesStage.module, nullptr);
+    vkDestroyShaderModule(dev, fsStage.module, nullptr);
+}
+
+void RenderingSystem::createLightRenderPass_(Engine& engine) {
+    VkAttachmentDescription colorAtt{};
+    colorAtt.format = engine.getSwapFormat(); colorAtt.samples = VK_SAMPLE_COUNT_1_BIT; colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE; colorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; colorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; colorAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; colorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &colorRef;
+    std::array<VkSubpassDependency, 2> deps{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0; deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL; deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; deps[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT; deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1; rpci.pAttachments = &colorAtt; rpci.subpassCount = 1; rpci.pSubpasses = &subpass; rpci.dependencyCount = (uint32_t)deps.size(); rpci.pDependencies = deps.data();
+    vkCreateRenderPass(engine.getDevice(), &rpci, nullptr, &lightRenderPass);
+}
+
+void RenderingSystem::createLightPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+    for (int i = 0; i < 3; ++i) { bindings[i].binding = i; bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; bindings[i].descriptorCount = 1; bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; }
+    bindings[3].binding = 3; bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; bindings[3].descriptorCount = 1; bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[4].binding = 4; bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; bindings[4].descriptorCount = 1; bindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lci.bindingCount = (uint32_t)bindings.size(); lci.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(dev, &lci, nullptr, &lightDescLayout);
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &lightDescLayout;
+    vkCreatePipelineLayout(dev, &plci, nullptr, &lightPipelineLayout);
+    auto vsStage = loadShader_(engine, "shaders/lighting.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto fsStage = loadShader_(engine, "shaders/lighting.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkPipelineShaderStageCreateInfo stages[] = {vsStage, fsStage};
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vpState.viewportCount = vpState.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rast{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rast.polygonMode = VK_POLYGON_MODE_FILL; rast.cullMode = VK_CULL_MODE_NONE; rast.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT; cba.blendEnable = VK_FALSE;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1; cb.pAttachments = &cba;
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynState.dynamicStateCount = 2; dynState.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 2; gci.pStages = stages; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vpState; gci.pRasterizationState = &rast; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb; gci.pDynamicState = &dynState; gci.layout = lightPipelineLayout; gci.renderPass = lightRenderPass;
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &lightPipeline);
+    vkDestroyShaderModule(dev, vsStage.module, nullptr); vkDestroyShaderModule(dev, fsStage.module, nullptr);
+}
+
+void RenderingSystem::createFramebuffers_(Engine& engine) {
+    const auto& views = engine.getSwapImageViews();
+    auto ext = engine.getSwapExtent();
+    lightFramebuffers.resize(views.size());
+    for (size_t i = 0; i < views.size(); ++i) {
+        VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fci.renderPass = lightRenderPass; fci.attachmentCount = 1; fci.pAttachments = &views[i]; fci.width = ext.width; fci.height = ext.height; fci.layers = 1;
+        vkCreateFramebuffer(engine.getDevice(), &fci, nullptr, &lightFramebuffers[i]);
+    }
+}
+
+void RenderingSystem::cleanupFramebuffers_(VkDevice device) {
+    for (auto fb : lightFramebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+    lightFramebuffers.clear();
+}
+
+void RenderingSystem::createDescriptors_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    int frames = Engine::MAX_FRAMES;
+    {
+        VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames};
+        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.poolSizeCount = 1; ci.pPoolSizes = &ps; ci.maxSets = (uint32_t)frames;
+        vkCreateDescriptorPool(dev, &ci, nullptr, &geomDescPool);
+        std::vector<VkDescriptorSetLayout> layouts(frames, geomUBOLayout);
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = geomDescPool; ai.descriptorSetCount = (uint32_t)frames; ai.pSetLayouts = layouts.data();
+        geomDescSets.resize(frames); vkAllocateDescriptorSets(dev, &ai, geomDescSets.data());
+        geomUBOBufs.resize(frames); geomUBOMems.resize(frames); geomUBOMapped.resize(frames);
+        for (int i = 0; i < frames; ++i) {
+            engine.createBuffer(sizeof(GeomUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geomUBOBufs[i], geomUBOMems[i]);
+            vkMapMemory(dev, geomUBOMems[i], 0, sizeof(GeomUBO), 0, &geomUBOMapped[i]);
+            VkDescriptorBufferInfo bi{geomUBOBufs[i], 0, sizeof(GeomUBO)};
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = geomDescSets[i]; w.dstBinding = 0; w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; w.descriptorCount = 1; w.pBufferInfo = &bi;
+            vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+        }
+    }
+    {
+        std::array<VkDescriptorPoolSize, 2> ps{};
+        ps[0] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)(4 * frames)};
+        ps[1] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames};
+        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.poolSizeCount = (uint32_t)ps.size(); ci.pPoolSizes = ps.data(); ci.maxSets = (uint32_t)frames;
+        vkCreateDescriptorPool(dev, &ci, nullptr, &lightDescPool);
+        std::vector<VkDescriptorSetLayout> layouts(frames, lightDescLayout);
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = lightDescPool; ai.descriptorSetCount = (uint32_t)frames; ai.pSetLayouts = layouts.data();
+        lightDescSets.resize(frames); vkAllocateDescriptorSets(dev, &ai, lightDescSets.data());
+        lightUBOBufs.resize(frames); lightUBOMems.resize(frames); lightUBOMapped.resize(frames);
+        for (int i = 0; i < frames; ++i) {
+            engine.createBuffer(sizeof(LightsUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, lightUBOBufs[i], lightUBOMems[i]);
+            vkMapMemory(dev, lightUBOMems[i], 0, sizeof(LightsUBO), 0, &lightUBOMapped[i]);
+        }
+    }
+}
+
+void RenderingSystem::updateLightDescSets_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    VkSampler gbSampler = gbuffer.getSampler();
+
+    VkImageView gbViews[3] = {gbuffer.getNormalView(), gbuffer.getAlbedoView(), gbuffer.getDepthView()};
+
+    for (int i = 0; i < Engine::MAX_FRAMES; ++i) {
+        std::array<VkWriteDescriptorSet, 5> writes{};
+        std::array<VkDescriptorImageInfo, 3> imgInfos{};
+        for (int b = 0; b < 3; ++b) {
+            imgInfos[b] = {gbSampler, gbViews[b], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[b].dstSet = lightDescSets[i];
+            writes[b].dstBinding = (uint32_t)b; writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[b].descriptorCount = 1; writes[b].pImageInfo = &imgInfos[b];
+        }
+        VkDescriptorBufferInfo uboInfo{lightUBOBufs[i], 0, sizeof(LightsUBO)};
+        writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[3].dstSet = lightDescSets[i];
+        writes[3].dstBinding = 3; writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[3].descriptorCount = 1; writes[3].pBufferInfo = &uboInfo;
+
+        VkDescriptorImageInfo shadowInfo{shadowSampler, shadowArrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[4].dstSet = lightDescSets[i];
+        writes[4].dstBinding = 4; writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[4].descriptorCount = 1; writes[4].pImageInfo = &shadowInfo;
+
+        vkUpdateDescriptorSets(dev, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    }
+}
+
+VkPipelineShaderStageCreateInfo RenderingSystem::loadShader_(Engine& engine, const std::string& path, VkShaderStageFlagBits stage) {
+    auto code = engine.readFile(path);
+    VkShaderModule sm = engine.createShaderModule(code);
+    VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    si.stage = stage; si.module = sm; si.pName = "main";
+    return si;
+}
+
+//filename: ./src/RenderingSystem.h
+#pragma once
+
+#include "Engine.h"
+#include "GBuffer.h"
+#include "Light.h"
+#include "Camera.h"
+#include <vector>
+
+class RenderingSystem {
+public:
+    void init(Engine& engine);
+    void cleanup(Engine& engine);
+    void onResize(Engine& engine);
+    void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
+    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<SceneObject>& objects, Engine& engine);
+
+private:
+    GBuffer gbuffer;
+
+    struct GeomUBO {
+        glm::mat4 view;
+        glm::mat4 proj;
+        glm::vec4 cameraPos; // Добавлена позиция камеры для тесселяции
+    };
+
+    VkDescriptorSetLayout geomUBOLayout = VK_NULL_HANDLE;
+    VkPipelineLayout geomPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline geomPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool geomDescPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> geomDescSets;
+    std::vector<VkBuffer> geomUBOBufs;
+    std::vector<VkDeviceMemory> geomUBOMems;
+    std::vector<void*> geomUBOMapped;
+
+    VkRenderPass lightRenderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> lightFramebuffers;
+    VkDescriptorSetLayout lightDescLayout = VK_NULL_HANDLE;
+    VkPipelineLayout lightPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline lightPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool lightDescPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> lightDescSets;
+    std::vector<VkBuffer> lightUBOBufs;
+    std::vector<VkDeviceMemory> lightUBOMems;
+    std::vector<void*> lightUBOMapped;
+
+    VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
+    VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    VkImage shadowImage = VK_NULL_HANDLE;
+    VkDeviceMemory shadowMemory = VK_NULL_HANDLE;
+    VkImageView shadowArrayView = VK_NULL_HANDLE;
+    std::vector<VkImageView> shadowLayerViews;
+    std::vector<VkFramebuffer> shadowFramebuffers;
+    VkSampler shadowSampler = VK_NULL_HANDLE;
+
+    std::vector<LightData> pendingLights;
+
+    void createShadowResources_(Engine& engine);
+    void createShadowPipeline_(Engine& engine);
+    void createGeomPipeline_(Engine& engine);
+    void createLightRenderPass_(Engine& engine);
+    void createLightPipeline_(Engine& engine);
+    void createFramebuffers_(Engine& engine);
+    void createDescriptors_(Engine& engine);
+    void updateLightDescSets_(Engine& engine);
+    void cleanupFramebuffers_(VkDevice device);
+    VkPipelineShaderStageCreateInfo loadShader_(Engine& engine, const std::string& path, VkShaderStageFlagBits stage);
+};
+
+//filename: ./src/Timer.h
+#pragma once
+#include <chrono>
+
+class Timer {
+public:
+    using Clock = std::chrono::high_resolution_clock;
+
+    Timer() { reset(); }
+
+    void reset() {
+        m_start = m_prev = Clock::now();
+        m_dt = m_total = 0.f;
+        m_fps = m_frames = 0;
+        m_fpsAccum = 0.f;
+    }
+
+    void tick() {
+        auto now   = Clock::now();
+        m_dt       = std::chrono::duration<float>(now - m_prev).count();
+        m_total    = std::chrono::duration<float>(now - m_start).count();
+        m_prev     = now;
+        if (m_dt > 0.1f) m_dt = 0.1f;
+        m_fpsAccum += m_dt;
+        m_frames++;
+        if (m_fpsAccum >= 1.f) {
+            m_fps      = m_frames;
+            m_frames   = 0;
+            m_fpsAccum -= 1.f;
+        }
+    }
+
+    float dt()    const { return m_dt;    }
+    float total() const { return m_total; }
+    int   fps()   const { return m_fps;   }
+
+private:
+    Clock::time_point m_start, m_prev;
+    float m_dt, m_total, m_fpsAccum;
+    int   m_fps, m_frames;
+};
+
+//filename: ./src/Types.h
+#pragma once
+#include <vulkan/vulkan.h>
+#include <glm/glm.hpp>
+#include <vector>
+#include <string>
+#include <array>
+
+struct Vertex {
+    glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec2 uv;
+
+    static VkVertexInputBindingDescription binding() {
+        return {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 3> attrs() {
+        return {{
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, pos)},
+            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)},
+            {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(Vertex, uv)},
+        }};
+    }
+};
+
+struct alignas(16) UBO {
+    glm::mat4 model;
+    glm::mat4 view;
+    glm::mat4 proj;
+    glm::vec4 lightPos;
+    glm::vec4 lightColor;
+    glm::vec4 viewPos;
+    glm::vec2 uvOffset;
+    glm::vec2 uvScale;
+    float     time;
+    float     animMode;
+    float     _pad[2];
+};
+
+struct MeshData {
+    std::vector<Vertex>   vertices;
+    std::vector<uint32_t> indices;
+    std::string           texturePath;
+};
+
+//filename: ./src/Window.cpp
+#include "Window.h"
+#include <stdexcept>
+
+std::unordered_map<GLFWwindow*, Window*> Window::s_map;
+
+Window::Window(int w, int h, const std::string& title) : m_w(w), m_h(h) {
+    if (!glfwInit())
+        throw std::runtime_error("glfwInit failed");
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    m_window = glfwCreateWindow(w, h, title.c_str(), nullptr, nullptr);
+    if (!m_window) { glfwTerminate(); throw std::runtime_error("glfwCreateWindow failed"); }
+    s_map[m_window] = this;
+    glfwSetFramebufferSizeCallback(m_window, resizeCb);
+}
+
+Window::~Window() {
+    s_map.erase(m_window);
+    glfwDestroyWindow(m_window);
+    glfwTerminate();
+}
+
+//filename: ./src/Window.h
+#pragma once
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#include <string>
+#include <unordered_map>
+
+class Window {
+public:
+    Window(int w, int h, const std::string& title);
+    ~Window();
+    Window(const Window&) = delete;
+    Window& operator=(const Window&) = delete;
+
+    bool shouldClose() const { return glfwWindowShouldClose(m_window); }
+    void poll()              { glfwPollEvents(); }
+    void setTitle(const std::string& t) { glfwSetWindowTitle(m_window, t.c_str()); }
+
+    GLFWwindow* handle()  const { return m_window; }
+    int         width()   const { return m_w; }
+    int         height()  const { return m_h; }
+    float       aspect()  const { return m_h > 0 ? float(m_w) / float(m_h) : 1.f; }
+    bool        resized() const { return m_resized; }
+    void        clearResize()   { m_resized = false; }
+
+private:
+    static std::unordered_map<GLFWwindow*, Window*> s_map;
+    static void resizeCb(GLFWwindow* w, int width, int height) {
+        auto it = s_map.find(w);
+        if (it == s_map.end()) return;
+        it->second->m_w = width;
+        it->second->m_h = height;
+        it->second->m_resized = true;
+    }
+
+    GLFWwindow* m_window = nullptr;
+    int  m_w, m_h;
+    bool m_resized = false;
+};
+
+//filename: ./src/main.cpp
+#include "Engine.h"
+#include "RenderingSystem.h"
+#include "Light.h"
+#include "Camera.h"
+#include "Input.h"
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+#include <filesystem>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <cmath>
+#include <iostream>
+
+namespace fs = std::filesystem;
+
+struct FallingFlashlight {
+    glm::vec3 position;
+    glm::vec3 velocity;
+    glm::vec3 color;
+    SceneObject object;
+};
+
+static std::string normSlashes(std::string p) {
+    for (char& c : p) if (c == '\\') c = '/';
+    return p;
+}
+
+static std::string findTexture(const std::string& name, const fs::path& baseDir) {
+    if (name.empty()) return {};
+    std::string n = normSlashes(name);
+    if (fs::exists(n)) return n;
+    if (fs::exists(baseDir / n)) return (baseDir / n).string();
+    auto fn = fs::path(n).filename();
+    if (fs::exists(baseDir / fn)) return (baseDir / fn).string();
+    if (fs::exists(baseDir / "textures" / fn)) return (baseDir / "textures" / fn).string();
+    return {};
+}
+
+static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool animatable = false) {
+    fs::path basePath = fs::path(objPath).parent_path();
+    tinyobj::ObjReaderConfig cfg;
+    cfg.mtl_search_path = basePath.string();
+    cfg.triangulate = true;
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error("tinyobj failed");
+    const auto& attrib = reader.GetAttrib();
+    const auto& shapes = reader.GetShapes();
+    const auto& materials = reader.GetMaterials();
+
+    TextureHandle whiteTex = engine.createWhiteTexture();
+    TextureHandle defNormTex = engine.createDefaultNormalTexture();
+    TextureHandle blackTex = engine.createBlackTexture();
+
+    SceneObject obj;
+    obj.animatable = animatable;
+    for (const auto& shape : shapes) {
+        std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches;
+        size_t off = 0;
+        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
+            int matID = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[f];
+            auto& [verts, inds] = batches[matID];
+            for (int v = 0; v < 3; ++v) {
+                tinyobj::index_t idx = shape.mesh.indices[off + v];
+                Vertex vert{};
+                vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
+                if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
+                if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]};
+                inds.push_back((uint32_t)verts.size());
+                verts.push_back(vert);
+            }
+            off += 3;
+        }
+        for (auto& [matID, pair] : batches) {
+            auto& [verts, inds] = pair;
+            if (verts.empty()) continue;
+
+            // Расчет тангенсов
+            for (size_t i = 0; i < inds.size(); i += 3) {
+                Vertex& v0 = verts[inds[i]];
+                Vertex& v1 = verts[inds[i+1]];
+                Vertex& v2 = verts[inds[i+2]];
+
+                glm::vec3 e1 = v1.pos - v0.pos;
+                glm::vec3 e2 = v2.pos - v0.pos;
+                glm::vec2 duv1 = v1.texCoord - v0.texCoord;
+                glm::vec2 duv2 = v2.texCoord - v0.texCoord;
+
+                float f = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y + 0.0001f);
+                glm::vec3 tangent;
+                tangent.x = f * (duv2.y * e1.x - duv1.y * e2.x);
+                tangent.y = f * (duv2.y * e1.y - duv1.y * e2.y);
+                tangent.z = f * (duv2.y * e1.z - duv1.y * e2.z);
+                tangent = glm::normalize(tangent);
+
+                v0.tangent = v1.tangent = v2.tangent = tangent;
+            }
+
+            SubMesh sm;
+            sm.mesh = engine.createMesh(verts, inds);
+
+            TextureHandle tDiff = whiteTex;
+            TextureHandle tNorm = defNormTex;
+            TextureHandle tDisp = blackTex;
+            sm.dispScale = 0.0f; // По умолчанию тесселяция выключена
+
+            if (matID >= 0) {
+                auto pDiff = findTexture(materials[matID].diffuse_texname, basePath);
+                auto pNorm = findTexture(materials[matID].bump_texname, basePath);
+                auto pDisp = findTexture(materials[matID].displacement_texname, basePath);
+
+                if (!pDiff.empty()) tDiff = engine.loadTexture(pDiff);
+                if (!pNorm.empty()) tNorm = engine.loadTexture(pNorm);
+
+                if (!pDisp.empty()) {
+                    tDisp = engine.loadTexture(pDisp);
+                    sm.dispScale = 0.05f;
+                } else if (pNorm.find("displace") != std::string::npos && pDisp.empty()) {
+                    tDisp = engine.loadTexture(pNorm);
+                    sm.dispScale = 0.05f;
+                }
+            }
+
+            sm.texture = tDiff;
+            sm.normalMap = tNorm;
+            sm.dispMap = tDisp;
+            sm.matSet = engine.createMaterialSet(tDiff, tNorm, tDisp);
+
+            obj.submeshes.push_back(sm);
+        }
+    }
+    return obj;
+}
+
+static MeshHandle createCubeMesh(Engine& engine) {
+    std::vector<Vertex> v = {
+        {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,-1,-1}, {0,0,-1}, {1,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,0,-1}, {0,1}, {1,0,0}},
+        {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,-1,1}, {0,0,1}, {1,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,0,1}, {0,1}, {1,0,0}},
+        {{-1,-1,-1}, {-1,0,0}, {0,0}, {0,0,1}}, {{-1,1,-1}, {-1,0,0}, {1,0}, {0,0,1}}, {{-1,1,1}, {-1,0,0}, {1,1}, {0,0,1}}, {{-1,-1,-1}, {-1,0,0}, {0,0}, {0,0,1}}, {{-1,1,1}, {-1,0,0}, {1,1}, {0,0,1}}, {{-1,-1,1}, {-1,0,0}, {0,1}, {0,0,1}},
+        {{1,-1,-1}, {1,0,0}, {0,0}, {0,0,-1}}, {{1,1,-1}, {1,0,0}, {1,0}, {0,0,-1}}, {{1,1,1}, {1,0,0}, {1,1}, {0,0,-1}}, {{1,-1,-1}, {1,0,0}, {0,0}, {0,0,-1}}, {{1,1,1}, {1,0,0}, {1,1}, {0,0,-1}}, {{1,-1,1}, {1,0,0}, {0,1}, {0,0,-1}},
+        {{-1,-1,-1}, {0,-1,0}, {0,0}, {1,0,0}}, {{1,-1,-1}, {0,-1,0}, {1,0}, {1,0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}, {1,0,0}}, {{-1,-1,-1}, {0,-1,0}, {0,0}, {1,0,0}}, {{1,-1,1}, {0,-1,0}, {1,1}, {1,0,0}}, {{-1,-1,1}, {0,-1,0}, {0,1}, {1,0,0}},
+        {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,1,0}, {1,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,1,0}, {0,1}, {1,0,0}}
+    };
+    std::vector<uint32_t> i(36);
+    for(uint32_t j=0; j<36; ++j) i[j] = j;
+    return engine.createMesh(v, i);
+}
+
+int main() {
+    glfwInit();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    GLFWwindow* window = glfwCreateWindow(570, 320, "San Miguel Tessellation", nullptr, nullptr);
+
+    Input input;
+    input.init(window);
+
+    Engine engine;
+    RenderingSystem rs;
+    engine.init(window);
+    rs.init(engine);
+
+    MeshHandle cubeMesh = createCubeMesh(engine);
+    std::vector<SceneObject> objects;
+
+    std::vector<FallingFlashlight> droppedLights;
+    bool fPressedLastFrame = false;
+
+    const float GRAVITY = -9.81f;
+    const float FLOOR_Y = 0.05f;
+
+    std::cout << "Loading San Miguel..." << std::endl;
+    try {
+        auto sanMiguel = loadOBJ(engine, "assets/san-miguel-low-poly.obj", false);
+        sanMiguel.transform = glm::mat4(1.0f);
+        objects.push_back(std::move(sanMiguel));
+        std::cout << "San Miguel loaded successfully!" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading model: " << e.what() << std::endl;
+    }
+
+    for (int i=0; i<3; ++i) {
+        SceneObject cubeLight;
+        SubMesh sm;
+        sm.mesh = cubeMesh;
+        sm.texture = engine.createWhiteTexture();
+        sm.normalMap = engine.createDefaultNormalTexture();
+        sm.dispMap = engine.createBlackTexture();
+        sm.dispScale = 0.0f;
+        sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
+        cubeLight.submeshes.push_back(sm);
+        cubeLight.unlit = true;
+        objects.push_back(cubeLight);
+    }
+
+    Camera camera;
+    // Ставим камеру где-то в центр дворика
+    camera.position = glm::vec3(5.0f, 1.5f, 5.0f);
+    double lastTime = glfwGetTime();
+
+    while (!glfwWindowShouldClose(window)) {
+        input.update();
+        if (input.wasResized()) {
+            int w=0, h=0;
+            glfwGetFramebufferSize(window, &w, &h);
+            if (w == 0 || h == 0) continue;
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
+        }
+
+        double now = glfwGetTime();
+        float dt = (float)(now - lastTime);
+        lastTime = now;
+        camera.update(input, dt);
+
+        bool fIsDown = input.isKeyDown(GLFW_KEY_F);
+        if (fIsDown && !fPressedLastFrame) {
+            FallingFlashlight fl;
+            fl.position = camera.position;
+            fl.velocity = camera.front() * 10.0f;
+            fl.color = glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f) * 2.0f + 0.5f;
+
+            SubMesh sm;
+            sm.mesh = cubeMesh;
+            sm.texture = engine.createWhiteTexture();
+            sm.normalMap = engine.createDefaultNormalTexture();
+            sm.dispMap = engine.createBlackTexture();
+            sm.dispScale = 0.0f; // Кубикам дисплейсмент не нужен
+            sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
+
+            fl.object.submeshes.push_back(sm);
+            fl.object.unlit = true;
+            fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
+            droppedLights.push_back(fl);
+        }
+        fPressedLastFrame = fIsDown;
+
+        for (auto& fl : droppedLights) {
+            if (fl.position.y > FLOOR_Y) {
+                fl.velocity.y += GRAVITY * dt;
+                fl.position += fl.velocity * dt;
+            } else {
+                fl.position.y = FLOOR_Y;
+                fl.velocity = glm::vec3(0.0f);
+            }
+            fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+        }
+
+        std::vector<LightData> allLights;
+        // Солнце
+        allLights.push_back(Light::makeDirectional({-0.5f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.85f}, 2.0f, true, 0));
+
+        float px = 3.0f * (float)std::cos(now * 0.5) + 5.0f;
+        float pz = 3.0f * (float)std::sin(now * 0.5) + 5.0f;
+        allLights.push_back(Light::makePoint({px, 2.5f, pz}, {0.4f, 0.6f, 1.0f}, 5.0f, 10.0f));
+        allLights.push_back(Light::makeSpot({5.0f, 5.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, 15.0f, 25.0f, {1.0f, 0.3f, 0.2f}, 10.0f, 20.0f, true, 1));
+
+        for (const auto& fl : droppedLights) {
+            allLights.push_back(Light::makePoint(fl.position, fl.color, 8.0f, 12.0f));
+        }
+
+        if (allLights.size() > 64) allLights.resize(64);
+        rs.setLights(allLights);
+
+        for(size_t i=0; i<3; ++i) {
+            size_t objIdx = objects.size() - 3 + i;
+            if (objIdx < objects.size() && i + 1 < allLights.size()) {
+                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(allLights[i+1].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+                objects[objIdx].unlitColor = allLights[i+1].color * 3.0f;
+            }
+        }
+
+        std::vector<SceneObject> frameObjects = objects;
+        for (const auto& fl : droppedLights) {
+            frameObjects.push_back(fl.object);
+        }
+
+        FrameContext ctx = engine.beginFrame();
+        if (!ctx.valid) {
+            engine.recreateSwapchain();
+            rs.onResize(engine);
+            input.clearResized();
+            continue;
+        }
+
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine);
+        engine.endFrame(ctx);
+    }
+
+    rs.cleanup(engine);
+    engine.cleanup();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}
+

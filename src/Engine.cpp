@@ -122,19 +122,7 @@ TextureHandle Engine::registerTexture_(uint32_t w, uint32_t h, const unsigned ch
     si.maxAnisotropy = props.limits.maxSamplerAnisotropy;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     vkCreateSampler(device, &si, nullptr, &t.sampler);
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = materialPool;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &materialLayout;
-    vkAllocateDescriptorSets(device, &ai, &t.set);
-    VkDescriptorImageInfo imgInfo{t.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = t.set;
-    write.dstBinding = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imgInfo;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
     int id = (int)textures.size();
     textures.push_back(std::move(t));
     return TextureHandle{id};
@@ -144,7 +132,10 @@ TextureHandle Engine::loadTexture(const std::string& path) {
     int w, h, ch;
     stbi_set_flip_vertically_on_load(false);
     unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) return createWhiteTexture();
+    if (!pixels) {
+        std::cerr << "Failed to load texture: " << path << std::endl;
+        return createWhiteTexture();
+    }
     auto handle = registerTexture_((uint32_t)w, (uint32_t)h, pixels, (VkDeviceSize)w*h*4);
     stbi_image_free(pixels);
     return handle;
@@ -156,6 +147,57 @@ TextureHandle Engine::createWhiteTexture() {
     cachedWhiteTex = registerTexture_(1, 1, white, 4);
     return cachedWhiteTex;
 }
+
+TextureHandle Engine::createDefaultNormalTexture() {
+    if (cachedDefNormTex.valid()) return cachedDefNormTex;
+    uint8_t norm[4] = {128, 128, 255, 255};
+    cachedDefNormTex = registerTexture_(1, 1, norm, 4);
+    return cachedDefNormTex;
+}
+
+TextureHandle Engine::createBlackTexture() {
+    if (cachedBlackTex.valid()) return cachedBlackTex;
+    uint8_t black[4] = {0, 0, 0, 255};
+    cachedBlackTex = registerTexture_(1, 1, black, 4);
+    return cachedBlackTex;
+}
+
+VkDescriptorSet Engine::createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp) {
+    VkDescriptorSet set;
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = materialPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &materialLayout;
+
+    if (vkAllocateDescriptorSets(device, &ai, &set) != VK_SUCCESS) {
+        throw std::runtime_error("failed to allocate material descriptor set!");
+    }
+
+    auto getImgInfo = [&](TextureHandle h) -> VkDescriptorImageInfo {
+        auto& t = textures[h.id];
+        return {t.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    };
+
+    VkDescriptorImageInfo iDiff = getImgInfo(diff);
+    VkDescriptorImageInfo iNorm = getImgInfo(norm);
+    VkDescriptorImageInfo iDisp = getImgInfo(disp);
+
+    std::array<VkWriteDescriptorSet, 3> writes{};
+    for(int i=0; i<3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].descriptorCount = 1;
+    }
+    writes[0].pImageInfo = &iDiff;
+    writes[1].pImageInfo = &iNorm;
+    writes[2].pImageInfo = &iDisp;
+
+    vkUpdateDescriptorSets(device, 3, writes.data(), 0, nullptr);
+    return set;
+}
+
 
 MeshHandle Engine::createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices) {
     MeshRes m;
@@ -178,7 +220,7 @@ MeshHandle Engine::createMesh(const std::vector<Vertex>& verts, const std::vecto
 
 void Engine::createInstance_() {
     VkApplicationInfo ai{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    ai.pApplicationName = "VulkanDeferred";
+    ai.pApplicationName = "VulkanDeferredTessellation";
     ai.apiVersion = VK_API_VERSION_1_2;
     uint32_t glfwCount;
     const char** glfwExts = glfwGetRequiredInstanceExtensions(&glfwCount);
@@ -230,6 +272,8 @@ void Engine::createDevice_() {
     }
     VkPhysicalDeviceFeatures features{};
     features.samplerAnisotropy = VK_TRUE;
+    features.tessellationShader = VK_TRUE;
+
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     ci.queueCreateInfoCount = (uint32_t)qcis.size();
     ci.pQueueCreateInfos = qcis.data();
@@ -330,19 +374,30 @@ void Engine::createSyncObjects_() {
 }
 
 void Engine::createMaterialLayout_() {
-    VkDescriptorSetLayoutBinding b{};
-    b.binding = 0;
-    b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    b.descriptorCount = 1;
-    b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    // Diffuse
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Normal
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+
     VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ci.bindingCount = 1;
-    ci.pBindings = &b;
+    ci.bindingCount = (uint32_t)bindings.size();
+    ci.pBindings = bindings.data();
     vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialLayout);
 }
 
 void Engine::createMaterialPool_() {
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2048};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2048 * 3};
     VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     ci.poolSizeCount = 1;
     ci.pPoolSizes = &ps;
