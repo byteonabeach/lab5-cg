@@ -4,9 +4,14 @@ layout(location = 0) in vec3 inWorldPos;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 <<<<<<< HEAD
+<<<<<<< HEAD
 layout(location = 3) in vec3 inTangent;
 layout(location = 4) in vec4 inColor;
 layout(location = 5) in flat int inIsUnlit;
+=======
+layout(location = 3) in vec4 inColor;
+layout(location = 4) in flat int inIsUnlit;
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
 =======
 layout(location = 3) in vec4 inColor;
 layout(location = 4) in flat int inIsUnlit;
@@ -31,6 +36,7 @@ void main() {
     if (diffuse.a < 0.1) discard;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     vec3 N = normalize(inNormal);
     vec3 T = normalize(inTangent);
 
@@ -43,6 +49,8 @@ void main() {
 
     gNormal = vec4(finalNormal, 0.0);
 =======
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
     gPosition = vec4(inWorldPos, 1.0);
     gNormal = vec4(normalize(inNormal), 0.0);
 >>>>>>> parent of ad8e0d8 (SPONZA!!!)

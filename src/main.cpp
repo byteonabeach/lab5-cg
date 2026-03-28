@@ -172,6 +172,7 @@ int main() {
     std::vector<SceneObject> objects;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     std::vector<FallingFlashlight> droppedLights;
     bool fPressedLastFrame = false;
 
@@ -179,6 +180,8 @@ int main() {
     const float FLOOR_Y = 0.05f;
 
     std::cout << "Loading Sponza..." << std::endl;
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
 =======
 >>>>>>> parent of ad8e0d8 (SPONZA!!!)
     try {
@@ -224,6 +227,7 @@ int main() {
         lastTime = now;
         camera.update(input, dt);
 
+<<<<<<< HEAD
 <<<<<<< HEAD
         bool fIsDown = input.isKeyDown(GLFW_KEY_F);
         if (fIsDown && !fPressedLastFrame) {
@@ -288,6 +292,8 @@ int main() {
         }
 
 =======
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
         if (input.isKeyDown(GLFW_KEY_U) && animIdx >= 0) objects[animIdx].nextAnimFrame();
 
         std::vector<LightData> lights;
@@ -306,6 +312,9 @@ int main() {
             }
         }
 
+<<<<<<< HEAD
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
+=======
 >>>>>>> parent of ad8e0d8 (SPONZA!!!)
         FrameContext ctx = engine.beginFrame();
         if (!ctx.valid) {
@@ -316,8 +325,12 @@ int main() {
         }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         // Передаем (float)now для времени
         rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine, (float)now);
+=======
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
 =======
         rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, objects, engine);
 >>>>>>> parent of ad8e0d8 (SPONZA!!!)

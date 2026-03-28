@@ -79,8 +79,11 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     lubo.viewPos = glm::vec4(camera.position, 1.0f);
     lubo.ambientColor = glm::vec4(0.08f, 0.08f, 0.10f, 1.0f);
 <<<<<<< HEAD
+<<<<<<< HEAD
     lubo.invViewProj = glm::inverse(gubo.proj * gubo.view);
 
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
 =======
 >>>>>>> parent of ad8e0d8 (SPONZA!!!)
     int cnt = std::min((int)pendingLights.size(), MAX_LIGHTS);
@@ -120,11 +123,16 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     std::array<VkClearValue, 3> clears{};
     clears[0].color = {0,0,0,0};
     clears[1].color = {0,0,0,0};
     clears[2].depthStencil = {1.0f, 0};
 
+=======
+    std::array<VkClearValue, 4> clears{};
+    clears[0].color = {0,0,0,0}; clears[1].color = {0,0,0,0}; clears[2].color = {0,0,0,0}; clears[3].depthStencil = {1.0f, 0};
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
 =======
     std::array<VkClearValue, 4> clears{};
     clears[0].color = {0,0,0,0}; clears[1].color = {0,0,0,0}; clears[2].color = {0,0,0,0}; clears[3].depthStencil = {1.0f, 0};
@@ -146,6 +154,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             gpc.color = obj.unlitColor;
             gpc.isUnlit = obj.unlit ? 1 : 0;
 <<<<<<< HEAD
+<<<<<<< HEAD
             gpc.dispScale = sm.dispScale;
             gpc.time = time;
             gpc.isCurtain = sm.isCurtain ? 1 : 0;
@@ -157,6 +166,8 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             if (!obj.unlit && sm.matSet != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &sm.matSet, 0, nullptr);
 =======
+=======
+>>>>>>> parent of ad8e0d8 (SPONZA!!!)
             vkCmdPushConstants(cmd, geomPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GeomPC), &gpc);
             if (!obj.unlit && sm.texture.valid()) {
                 VkDescriptorSet matSet = engine.getTextureSet(sm.texture);
