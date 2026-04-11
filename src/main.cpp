@@ -52,7 +52,7 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
     cfg.mtl_search_path = basePath.string();
     cfg.triangulate = true;
     tinyobj::ObjReader reader;
-    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error("tinyobj failed: " + reader.Error());
+    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error(reader.Error());
 
     const auto& attrib = reader.GetAttrib();
     const auto& shapes = reader.GetShapes();
@@ -196,7 +196,8 @@ int main() {
     std::vector<FallingFlashlight> droppedLights;
 
     bool fPressedLastFrame = false;
-    bool key1Last = false, key2Last = false, key3Last = false;
+    bool key1Last = false, key2Last = false, key3Last = false, key4Last = false;
+    bool drawOctree = false;
 
     const float GRAVITY = -9.81f;
     const float FLOOR_Y = 0.05f;
@@ -205,6 +206,7 @@ int main() {
     try {
         auto sponza = loadOBJ(engine, "assets/sponza.obj", false);
         sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
+        sponza.updateWorldBounds();
         staticObjects.push_back(std::move(sponza));
         std::cout << "Sponza loaded successfully!" << '\n';
     } catch (const std::exception& e) {
@@ -232,6 +234,7 @@ int main() {
 
         cubeObj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(rx, ry, rz)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
         cubeObj.unlitColor = glm::vec4((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f, 1.0f);
+        cubeObj.updateWorldBounds();
 
         staticObjects.push_back(cubeObj);
     }
@@ -246,13 +249,17 @@ int main() {
     camera.position = glm::vec3(0.0f, 1.5f, 0.0f);
     double lastTime = glfwGetTime();
     double statTimer = 0.0;
+    uint32_t frameId = 1;
 
     CullingMode currentMode = CULLING_OCTREE;
     std::cout << "\nControls:\n"
               << "[1] No Culling\n"
               << "[2] Brute-force Frustum Culling\n"
               << "[3] Octree Frustum Culling\n"
+              << "[4] Toggle Octree Bounds\n"
               << "[F] Drop flashlight\n";
+
+    std::vector<const SceneObject*> visibleObjects;
 
     while (!glfwWindowShouldClose(window)) {
         input.update();
@@ -274,10 +281,12 @@ int main() {
         bool k1 = input.isKeyDown(GLFW_KEY_1);
         bool k2 = input.isKeyDown(GLFW_KEY_2);
         bool k3 = input.isKeyDown(GLFW_KEY_3);
+        bool k4 = input.isKeyDown(GLFW_KEY_4);
         if (k1 && !key1Last) currentMode = CULLING_NONE;
         if (k2 && !key2Last) currentMode = CULLING_BRUTE_FORCE;
         if (k3 && !key3Last) currentMode = CULLING_OCTREE;
-        key1Last = k1; key2Last = k2; key3Last = k3;
+        if (k4 && !key4Last) drawOctree = !drawOctree;
+        key1Last = k1; key2Last = k2; key3Last = k3; key4Last = k4;
 
         bool fIsDown = input.isKeyDown(GLFW_KEY_F);
         if (fIsDown && !fPressedLastFrame) {
@@ -290,6 +299,8 @@ int main() {
             fl.object.unlit = true;
             fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
             fl.object.localBounds = cubeLocalBounds;
+            fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+            fl.object.updateWorldBounds();
             droppedLights.push_back(fl);
         }
         fPressedLastFrame = fIsDown;
@@ -298,11 +309,14 @@ int main() {
             if (fl.position.y > FLOOR_Y) {
                 fl.velocity.y += GRAVITY * dt;
                 fl.position += fl.velocity * dt;
-            } else {
+                fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+                fl.object.updateWorldBounds();
+            } else if (fl.velocity.y != 0.0f) {
                 fl.position.y = FLOOR_Y;
                 fl.velocity = glm::vec3(0.0f);
+                fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+                fl.object.updateWorldBounds();
             }
-            fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
         }
 
         std::vector<LightData> allLights;
@@ -326,26 +340,32 @@ int main() {
         Frustum cameraFrustum;
         cameraFrustum.extract(viewProj);
 
-        std::vector<const SceneObject*> visibleObjects;
+        visibleObjects.clear();
+        uint32_t qFrame = frameId++;
 
         if (currentMode == CULLING_NONE) {
             for (const auto& obj : staticObjects) visibleObjects.push_back(&obj);
         }
         else if (currentMode == CULLING_BRUTE_FORCE) {
             for (const auto& obj : staticObjects) {
-                if (cameraFrustum.intersects(obj.getWorldBounds())) {
+                if (cameraFrustum.intersects(obj.worldBounds)) {
                     visibleObjects.push_back(&obj);
                 }
             }
         }
         else if (currentMode == CULLING_OCTREE) {
-            sceneOctree.query(cameraFrustum, visibleObjects);
+            sceneOctree.query(cameraFrustum, visibleObjects, qFrame);
         }
 
         for (const auto& fl : droppedLights) {
-            if (currentMode == CULLING_NONE || cameraFrustum.intersects(fl.object.getWorldBounds())) {
+            if (currentMode == CULLING_NONE || cameraFrustum.intersects(fl.object.worldBounds)) {
                 visibleObjects.push_back(&fl.object);
             }
+        }
+
+        std::vector<AABB> debugBoxes;
+        if (drawOctree && currentMode == CULLING_OCTREE) {
+            sceneOctree.getActiveNodes(debugBoxes);
         }
 
         if (statTimer >= 1.0) {
@@ -365,7 +385,7 @@ int main() {
             continue;
         }
 
-        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, visibleObjects, engine, (float)now);
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, visibleObjects, engine, (float)now, cubeMesh, debugBoxes);
         engine.endFrame(ctx);
     }
 

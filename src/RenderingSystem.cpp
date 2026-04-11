@@ -3,7 +3,7 @@
 #include <cstring>
 
 struct GeomPC {
-    glm::mat4 model;
+    glm::mat4 padding;
     glm::vec4 color;
     int isUnlit;
     float dispScale;
@@ -12,16 +12,17 @@ struct GeomPC {
 };
 
 struct ShadowPC {
-    glm::mat4 model;
     glm::mat4 lightSpace;
 };
 
 void RenderingSystem::init(Engine& engine) {
     auto ext = engine.getSwapExtent();
     gbuffer.init(engine, ext.width, ext.height);
+    createInstanceBuffers_(engine);
     createShadowResources_(engine);
     createShadowPipeline_(engine);
     createGeomPipeline_(engine);
+    createDebugPipeline_(engine);
     createLightRenderPass_(engine);
     createLightPipeline_(engine);
     createFramebuffers_(engine);
@@ -39,6 +40,7 @@ void RenderingSystem::cleanup(Engine& engine) {
     vkDestroyDescriptorSetLayout(dev, lightDescLayout, nullptr);
     vkDestroyDescriptorPool(dev, lightDescPool, nullptr);
     vkDestroyPipeline(dev, geomPipeline, nullptr);
+    vkDestroyPipeline(dev, debugPipeline, nullptr);
     vkDestroyPipelineLayout(dev, geomPipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(dev, geomUBOLayout, nullptr);
     vkDestroyDescriptorPool(dev, geomDescPool, nullptr);
@@ -51,9 +53,11 @@ void RenderingSystem::cleanup(Engine& engine) {
     vkDestroyImage(dev, shadowImage, nullptr);
     vkFreeMemory(dev, shadowMemory, nullptr);
     vkDestroySampler(dev, shadowSampler, nullptr);
+
     for (int i = 0; i < Engine::MAX_FRAMES; ++i) {
         vkDestroyBuffer(dev, geomUBOBufs[i], nullptr); vkFreeMemory(dev, geomUBOMems[i], nullptr);
         vkDestroyBuffer(dev, lightUBOBufs[i], nullptr); vkFreeMemory(dev, lightUBOMems[i], nullptr);
+        vkDestroyBuffer(dev, instanceBufs[i], nullptr); vkFreeMemory(dev, instanceMems[i], nullptr);
     }
     gbuffer.cleanup(dev);
 }
@@ -67,7 +71,21 @@ void RenderingSystem::onResize(Engine& engine) {
     updateLightDescSets_(engine);
 }
 
-void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time) {
+void RenderingSystem::createInstanceBuffers_(Engine& engine) {
+    int frames = Engine::MAX_FRAMES;
+    instanceBufs.resize(frames);
+    instanceMems.resize(frames);
+    instanceMapped.resize(frames);
+    for(int i = 0; i < frames; ++i) {
+        engine.createBuffer(sizeof(InstanceData) * MAX_INSTANCES,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            instanceBufs[i], instanceMems[i]);
+        vkMapMemory(engine.getDevice(), instanceMems[i], 0, sizeof(InstanceData) * MAX_INSTANCES, 0, &instanceMapped[i]);
+    }
+}
+
+void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh, const std::vector<AABB>& debugBoxes) {
     auto ext = engine.getSwapExtent();
 
     GeomUBO gubo{};
@@ -86,12 +104,74 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     for (int i = 0; i < cnt; ++i) lubo.lights[i] = pendingLights[i];
     memcpy(lightUBOMapped[frameIndex], &lubo, sizeof(LightsUBO));
 
+    for (auto& b : activeBatches) {
+        b.instances.clear();
+    }
+
+    for (const auto* obj : objects) {
+        for (const auto& sm : obj->submeshes) {
+            if (!sm.mesh.valid()) continue;
+
+            RenderBatch* targetBatch = nullptr;
+            for (auto& b : activeBatches) {
+                if (b.mesh.id == sm.mesh.id && b.matSet == sm.matSet && b.isUnlit == obj->unlit && b.isCurtain == sm.isCurtain && b.unlitColor == obj->unlitColor) {
+                    targetBatch = &b;
+                    break;
+                }
+            }
+            if (!targetBatch) {
+                RenderBatch newBatch{};
+                newBatch.mesh = sm.mesh;
+                newBatch.matSet = sm.matSet;
+                newBatch.isUnlit = obj->unlit;
+                newBatch.unlitColor = obj->unlitColor;
+                newBatch.dispScale = sm.dispScale;
+                newBatch.isCurtain = sm.isCurtain;
+                activeBatches.push_back(newBatch);
+                targetBatch = &activeBatches.back();
+            }
+
+            InstanceData idata;
+            idata.model = obj->transform;
+            idata.color = obj->unlit ? obj->unlitColor : glm::vec4(1.0f);
+            targetBatch->instances.push_back(idata);
+        }
+    }
+
+    InstanceData* mappedData = (InstanceData*)instanceMapped[frameIndex];
+    uint32_t currentOffset = 0;
+
+    for (auto& b : activeBatches) {
+        if (b.instances.empty()) continue;
+        b.instanceOffset = currentOffset;
+        b.instanceCount = (uint32_t)b.instances.size();
+        memcpy(mappedData + currentOffset, b.instances.data(), b.instanceCount * sizeof(InstanceData));
+        currentOffset += b.instanceCount;
+    }
+
+    std::vector<InstanceData> debugInstances;
+    debugInstances.reserve(debugBoxes.size());
+    for (const auto& b : debugBoxes) {
+        InstanceData id;
+        glm::vec3 center = (b.minVal + b.maxVal) * 0.5f;
+        glm::vec3 scale = (b.maxVal - b.minVal) * 0.5f;
+        id.model = glm::translate(glm::mat4(1.0f), center) * glm::scale(glm::mat4(1.0f), scale);
+        id.color = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+        debugInstances.push_back(id);
+    }
+
+    uint32_t debugOffset = currentOffset;
+    uint32_t debugCount = (uint32_t)debugInstances.size();
+    if (debugCount > 0) {
+        memcpy(mappedData + currentOffset, debugInstances.data(), debugCount * sizeof(InstanceData));
+        currentOffset += debugCount;
+    }
+
     for (int i = 0; i < cnt; ++i) {
         if (pendingLights[i].params2.x > 0.5f) {
             int layer = (int)pendingLights[i].params2.y;
             VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-            rpi.renderPass = shadowRenderPass;
-            rpi.framebuffer = shadowFramebuffers[layer];
+            rpi.renderPass = shadowRenderPass; rpi.framebuffer = shadowFramebuffers[layer];
             rpi.renderArea.extent = {2048, 2048};
             VkClearValue cv; cv.depthStencil = {1.0f, 0};
             rpi.clearValueCount = 1; rpi.pClearValues = &cv;
@@ -99,56 +179,65 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
             VkViewport vp{0, 0, 2048.0f, 2048.0f, 0.0f, 1.0f}; VkRect2D sc{{0, 0}, {2048, 2048}};
             vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
-            for (const auto* obj : objects) {
-                if (obj->unlit) continue;
-                for (const auto& sm : obj->submeshes) {
-                    if (!sm.mesh.valid()) continue;
-                    ShadowPC spc{};
-                    spc.model = obj->transform; spc.lightSpace = pendingLights[i].lightSpace;
-                    vkCmdPushConstants(cmd, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &spc);
-                    engine.bindAndDrawMesh_(cmd, sm.mesh);
-                }
+
+            for (const auto& batch : activeBatches) {
+                if (batch.isUnlit || batch.instances.empty()) continue;
+                ShadowPC spc{}; spc.lightSpace = pendingLights[i].lightSpace;
+                vkCmdPushConstants(cmd, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &spc);
+                engine.bindAndDrawInstanced(cmd, batch.mesh, instanceBufs[frameIndex], batch.instanceOffset, batch.instanceCount);
             }
             vkCmdEndRenderPass(cmd);
         }
     }
 
     std::array<VkClearValue, 3> clears{};
-    clears[0].color = {0,0,0,0};
-    clears[1].color = {0,0,0,0};
-    clears[2].depthStencil = {1.0f, 0};
-
+    clears[0].color = {0,0,0,0}; clears[1].color = {0,0,0,0}; clears[2].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpi.renderPass = gbuffer.getRenderPass(); rpi.framebuffer = gbuffer.getFramebuffer();
     rpi.renderArea.extent = ext; rpi.clearValueCount = (uint32_t)clears.size(); rpi.pClearValues = clears.data();
+
     vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipeline);
     VkViewport vp{0,0,(float)ext.width,(float)ext.height, 0.0f, 1.0f}; VkRect2D sc{{0,0}, ext};
     vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 0, 1, &geomDescSets[frameIndex], 0, nullptr);
 
-    for (const auto* obj : objects) {
-        for (const auto& sm : obj->submeshes) {
-            if (!sm.mesh.valid()) continue;
-            GeomPC gpc{};
-            gpc.model = obj->transform;
-            gpc.color = obj->unlitColor;
-            gpc.isUnlit = obj->unlit ? 1 : 0;
-            gpc.dispScale = sm.dispScale;
-            gpc.time = time;
-            gpc.isCurtain = sm.isCurtain ? 1 : 0;
+    for (const auto& batch : activeBatches) {
+        if (batch.instances.empty()) continue;
 
-            vkCmdPushConstants(cmd, geomPipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(GeomPC), &gpc);
+        GeomPC gpc{};
+        gpc.color = batch.unlitColor;
+        gpc.isUnlit = batch.isUnlit ? 1 : 0;
+        gpc.dispScale = batch.dispScale;
+        gpc.time = time;
+        gpc.isCurtain = batch.isCurtain ? 1 : 0;
 
-            if (!obj->unlit && sm.matSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &sm.matSet, 0, nullptr);
-            }
-            engine.bindAndDrawMesh_(cmd, sm.mesh);
+        vkCmdPushConstants(cmd, geomPipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(GeomPC), &gpc);
+
+        if (!batch.isUnlit && batch.matSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &batch.matSet, 0, nullptr);
         }
+        engine.bindAndDrawInstanced(cmd, batch.mesh, instanceBufs[frameIndex], batch.instanceOffset, batch.instanceCount);
     }
+
+    if (debugCount > 0 && debugCubeMesh.valid()) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debugPipeline);
+        GeomPC gpc{};
+        gpc.color = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+        gpc.isUnlit = 1;
+        gpc.dispScale = 0;
+        gpc.time = time;
+        gpc.isCurtain = 0;
+        vkCmdPushConstants(cmd, geomPipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(GeomPC), &gpc);
+        engine.bindAndDrawInstanced(cmd, debugCubeMesh, instanceBufs[frameIndex], debugOffset, debugCount);
+    }
+
     vkCmdEndRenderPass(cmd);
 
     std::array<VkClearValue, 1> lightClears{};
@@ -202,11 +291,23 @@ void RenderingSystem::createShadowPipeline_(Engine& engine) {
     plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(dev, &plci, nullptr, &shadowPipelineLayout);
     auto vsStage = loadShader_(engine, "shaders/shadows.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+
     auto bindDesc = Vertex::getBindingDesc();
-    auto attrDescs = Vertex::getAttrDescs();
+    auto attrDesc = Vertex::getAttrDescs();
+    auto instBindDesc = InstanceData::getBindingDesc();
+    auto instAttrDesc = InstanceData::getAttrDescs();
+
+    std::vector<VkVertexInputBindingDescription> binds = {bindDesc, instBindDesc};
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    for(auto& a : attrDesc) attrs.push_back(a);
+    for(auto& a : instAttrDesc) attrs.push_back(a);
+
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bindDesc;
-    vi.vertexAttributeDescriptionCount = 1; vi.pVertexAttributeDescriptions = &attrDescs[0];
+    vi.vertexBindingDescriptionCount = (uint32_t)binds.size();
+    vi.pVertexBindingDescriptions = binds.data();
+    vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
+    vi.pVertexAttributeDescriptions = attrs.data();
+
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -220,6 +321,7 @@ void RenderingSystem::createShadowPipeline_(Engine& engine) {
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dynState.dynamicStateCount = 2; dynState.pDynamicStates = dyn;
+
     VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gci.stageCount = 1; gci.pStages = &vsStage; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vpState; gci.pRasterizationState = &rast; gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds; gci.pDynamicState = &dynState; gci.layout = shadowPipelineLayout; gci.renderPass = shadowRenderPass;
     vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &shadowPipeline);
@@ -251,9 +353,21 @@ void RenderingSystem::createGeomPipeline_(Engine& engine) {
     auto fsStage = loadShader_(engine, "shaders/gbuffer.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
     VkPipelineShaderStageCreateInfo stages[] = {vsStage, tcsStage, tesStage, fsStage};
 
-    auto bindDesc = Vertex::getBindingDesc(); auto attrDesc = Vertex::getAttrDescs();
+    auto bindDesc = Vertex::getBindingDesc();
+    auto attrDesc = Vertex::getAttrDescs();
+    auto instBindDesc = InstanceData::getBindingDesc();
+    auto instAttrDesc = InstanceData::getAttrDescs();
+
+    std::vector<VkVertexInputBindingDescription> binds = {bindDesc, instBindDesc};
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    for(auto& a : attrDesc) attrs.push_back(a);
+    for(auto& a : instAttrDesc) attrs.push_back(a);
+
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bindDesc; vi.vertexAttributeDescriptionCount = (uint32_t)attrDesc.size(); vi.pVertexAttributeDescriptions = attrDesc.data();
+    vi.vertexBindingDescriptionCount = (uint32_t)binds.size();
+    vi.pVertexBindingDescriptions = binds.data();
+    vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
+    vi.pVertexAttributeDescriptions = attrs.data();
 
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
@@ -295,6 +409,69 @@ void RenderingSystem::createGeomPipeline_(Engine& engine) {
     vkDestroyShaderModule(dev, vsStage.module, nullptr);
     vkDestroyShaderModule(dev, tcsStage.module, nullptr);
     vkDestroyShaderModule(dev, tesStage.module, nullptr);
+    vkDestroyShaderModule(dev, fsStage.module, nullptr);
+}
+
+void RenderingSystem::createDebugPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+    auto vsStage = loadShader_(engine, "shaders/gbuffer.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto fsStage = loadShader_(engine, "shaders/gbuffer.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkPipelineShaderStageCreateInfo stages[] = {vsStage, fsStage};
+
+    auto bindDesc = Vertex::getBindingDesc();
+    auto attrDesc = Vertex::getAttrDescs();
+    auto instBindDesc = InstanceData::getBindingDesc();
+    auto instAttrDesc = InstanceData::getAttrDescs();
+
+    std::vector<VkVertexInputBindingDescription> binds = {bindDesc, instBindDesc};
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    for(auto& a : attrDesc) attrs.push_back(a);
+    for(auto& a : instAttrDesc) attrs.push_back(a);
+
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = (uint32_t)binds.size();
+    vi.pVertexBindingDescriptions = binds.data();
+    vi.vertexAttributeDescriptionCount = (uint32_t)attrs.size();
+    vi.pVertexAttributeDescriptions = attrs.data();
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vpState.viewportCount = vpState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rast{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rast.polygonMode = VK_POLYGON_MODE_LINE;
+    rast.cullMode = VK_CULL_MODE_NONE;
+    rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rast.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_TRUE; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    std::array<VkPipelineColorBlendAttachmentState, GBuffer::NUM_ATTACHMENTS> cbAtts{};
+    for (auto& att : cbAtts) { att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT; att.blendEnable = VK_FALSE; }
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = (uint32_t)cbAtts.size(); cb.pAttachments = cbAtts.data();
+
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynState.dynamicStateCount = 2; dynState.pDynamicStates = dyn;
+
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 2; gci.pStages = stages;
+    gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
+    gci.pViewportState = &vpState; gci.pRasterizationState = &rast;
+    gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds;
+    gci.pColorBlendState = &cb; gci.pDynamicState = &dynState;
+    gci.layout = geomPipelineLayout; gci.renderPass = gbuffer.getRenderPass();
+
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &debugPipeline);
+
+    vkDestroyShaderModule(dev, vsStage.module, nullptr);
     vkDestroyShaderModule(dev, fsStage.module, nullptr);
 }
 

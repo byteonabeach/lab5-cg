@@ -41,9 +41,11 @@ public:
     std::unique_ptr<OctreeNode> root;
 
     void build(const std::vector<SceneObject>& allObjects);
-    void query(const Frustum& frustum, std::vector<const SceneObject*>& result) const;
+    void query(const Frustum& frustum, std::vector<const SceneObject*>& result, uint32_t frameId) const;
+    void getActiveNodes(std::vector<AABB>& outNodes) const;
 
 private:
     void insert(OctreeNode* node, const SceneObject* obj, const AABB& objBounds, int depth);
-    void queryNode(const OctreeNode* node, const Frustum& frustum, std::vector<const SceneObject*>& result) const;
+    void queryNode(const OctreeNode* node, const Frustum& frustum, std::vector<const SceneObject*>& result, uint32_t frameId) const;
+    void collectNodes(const OctreeNode* node, std::vector<AABB>& outNodes) const;
 };

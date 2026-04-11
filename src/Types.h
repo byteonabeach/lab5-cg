@@ -23,6 +23,29 @@ struct Vertex {
     }
 };
 
+struct InstanceData {
+    glm::mat4 model;
+    glm::vec4 color;
+
+    static VkVertexInputBindingDescription getBindingDesc() {
+        VkVertexInputBindingDescription d{};
+        d.binding = 1;
+        d.stride = sizeof(InstanceData);
+        d.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        return d;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 5> getAttrDescs() {
+        std::array<VkVertexInputAttributeDescription, 5> a{};
+        a[0] = {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, model) + 0 * sizeof(glm::vec4)};
+        a[1] = {5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, model) + 1 * sizeof(glm::vec4)};
+        a[2] = {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, model) + 2 * sizeof(glm::vec4)};
+        a[3] = {7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, model) + 3 * sizeof(glm::vec4)};
+        a[4] = {8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, color)};
+        return a;
+    }
+};
+
 struct alignas(16) UBO {
     glm::mat4 model;
     glm::mat4 view;

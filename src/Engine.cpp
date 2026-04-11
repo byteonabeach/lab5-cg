@@ -273,6 +273,7 @@ void Engine::createDevice_() {
     VkPhysicalDeviceFeatures features{};
     features.samplerAnisotropy = VK_TRUE;
     features.tessellationShader = VK_TRUE;
+    features.fillModeNonSolid = VK_TRUE;
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     ci.queueCreateInfoCount = (uint32_t)qcis.size();
@@ -375,12 +376,10 @@ void Engine::createSyncObjects_() {
 
 void Engine::createMaterialLayout_() {
     std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
-    // Diffuse
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    // Normal
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;

@@ -6,7 +6,7 @@ void Octree::build(const std::vector<SceneObject>& allObjects) {
 
     AABB sceneBounds;
     for (const auto& obj : allObjects) {
-        sceneBounds.expand(obj.getWorldBounds());
+        sceneBounds.expand(obj.worldBounds);
     }
 
     sceneBounds.minVal -= glm::vec3(0.1f);
@@ -15,7 +15,7 @@ void Octree::build(const std::vector<SceneObject>& allObjects) {
     root = std::make_unique<OctreeNode>(sceneBounds);
 
     for (const auto& obj : allObjects) {
-        insert(root.get(), &obj, obj.getWorldBounds(), 0);
+        insert(root.get(), &obj, obj.worldBounds, 0);
     }
 }
 
@@ -28,7 +28,7 @@ void Octree::insert(OctreeNode* node, const SceneObject* obj, const AABB& objBou
             node->objects.clear();
 
             for (const auto& oldObj : oldObjects) {
-                AABB oldBounds = oldObj->getWorldBounds();
+                AABB oldBounds = oldObj->worldBounds;
                 for (int i = 0; i < 8; ++i) {
                     if (glm::max(node->children[i]->bounds.minVal, oldBounds.minVal).x <= glm::min(node->children[i]->bounds.maxVal, oldBounds.maxVal).x &&
                         glm::max(node->children[i]->bounds.minVal, oldBounds.minVal).y <= glm::min(node->children[i]->bounds.maxVal, oldBounds.maxVal).y &&
@@ -49,23 +49,39 @@ void Octree::insert(OctreeNode* node, const SceneObject* obj, const AABB& objBou
     }
 }
 
-void Octree::query(const Frustum& frustum, std::vector<const SceneObject*>& result) const {
+void Octree::query(const Frustum& frustum, std::vector<const SceneObject*>& result, uint32_t frameId) const {
     if (!root) return;
-    queryNode(root.get(), frustum, result);
+    queryNode(root.get(), frustum, result, frameId);
 }
 
-void Octree::queryNode(const OctreeNode* node, const Frustum& frustum, std::vector<const SceneObject*>& result) const {
+void Octree::queryNode(const OctreeNode* node, const Frustum& frustum, std::vector<const SceneObject*>& result, uint32_t frameId) const {
     if (!frustum.intersects(node->bounds)) return;
 
     if (node->isLeaf) {
         for (const auto& obj : node->objects) {
-            if (frustum.intersects(obj->getWorldBounds())) {
-                result.push_back(obj);
+            if (obj->lastQueryFrame != frameId) {
+                if (frustum.intersects(obj->worldBounds)) {
+                    obj->lastQueryFrame = frameId;
+                    result.push_back(obj);
+                }
             }
         }
     } else {
         for (int i = 0; i < 8; ++i) {
-            queryNode(node->children[i].get(), frustum, result);
+            queryNode(node->children[i].get(), frustum, result, frameId);
+        }
+    }
+}
+
+void Octree::getActiveNodes(std::vector<AABB>& outNodes) const {
+    if (root) collectNodes(root.get(), outNodes);
+}
+
+void Octree::collectNodes(const OctreeNode* node, std::vector<AABB>& outNodes) const {
+    outNodes.push_back(node->bounds);
+    if (!node->isLeaf) {
+        for (int i = 0; i < 8; ++i) {
+            collectNodes(node->children[i].get(), outNodes);
         }
     }
 }

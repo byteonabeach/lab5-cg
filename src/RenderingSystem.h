@@ -6,13 +6,25 @@
 #include "Camera.h"
 #include <vector>
 
+struct RenderBatch {
+    MeshHandle mesh;
+    VkDescriptorSet matSet;
+    bool isUnlit;
+    glm::vec4 unlitColor;
+    float dispScale;
+    bool isCurtain;
+    uint32_t instanceOffset;
+    uint32_t instanceCount;
+    std::vector<InstanceData> instances;
+};
+
 class RenderingSystem {
 public:
     void init(Engine& engine);
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
-    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time);
+    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& debugBoxes = {});
 
 private:
     GBuffer gbuffer;
@@ -23,9 +35,18 @@ private:
         glm::vec4 cameraPos;
     };
 
+    static constexpr int MAX_INSTANCES = 20000;
+    std::vector<VkBuffer> instanceBufs;
+    std::vector<VkDeviceMemory> instanceMems;
+    std::vector<void*> instanceMapped;
+    void createInstanceBuffers_(Engine& engine);
+
+    std::vector<RenderBatch> activeBatches;
+
     VkDescriptorSetLayout geomUBOLayout = VK_NULL_HANDLE;
     VkPipelineLayout geomPipelineLayout = VK_NULL_HANDLE;
     VkPipeline geomPipeline = VK_NULL_HANDLE;
+    VkPipeline debugPipeline = VK_NULL_HANDLE;
     VkDescriptorPool geomDescPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> geomDescSets;
     std::vector<VkBuffer> geomUBOBufs;
@@ -58,6 +79,7 @@ private:
     void createShadowResources_(Engine& engine);
     void createShadowPipeline_(Engine& engine);
     void createGeomPipeline_(Engine& engine);
+    void createDebugPipeline_(Engine& engine);
     void createLightRenderPass_(Engine& engine);
     void createLightPipeline_(Engine& engine);
     void createFramebuffers_(Engine& engine);
