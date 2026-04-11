@@ -30,6 +30,7 @@ add_executable(VulkanDeferred
     src/Engine.cpp
     src/GBuffer.cpp
     src/RenderingSystem.cpp
+    src/Octree.cpp
 )
 
 target_include_directories(VulkanDeferred PRIVATE
@@ -53,7 +54,7 @@ target_compile_definitions(VulkanDeferred PRIVATE
 
 find_program(GLSLC glslc HINTS ENV VULKAN_SDK PATH_SUFFIXES bin)
 if(NOT GLSLC)
-    message(FATAL_ERROR "glslc not found — install Vulkan SDK")
+  message(FATAL_ERROR "glslc not found — install Vulkan SDK")
 endif()
 
 set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
@@ -73,19 +74,18 @@ set(SHADERS
 )
 
 foreach(SHADER ${SHADERS})
-    add_custom_command(
+  add_custom_command(
         OUTPUT  ${SHADER_OUT}/${SHADER}.spv
         COMMAND ${GLSLC} ${SHADER_DIR}/${SHADER} -o ${SHADER_OUT}/${SHADER}.spv
         DEPENDS ${SHADER_DIR}/${SHADER}
         COMMENT "Compiling ${SHADER}"
     )
-    list(APPEND SPIRV_FILES ${SHADER_OUT}/${SHADER}.spv)
+  list(APPEND SPIRV_FILES ${SHADER_OUT}/${SHADER}.spv)
 endforeach()
 
 add_custom_target(Shaders ALL DEPENDS ${SPIRV_FILES})
 add_dependencies(VulkanDeferred Shaders)
 
-# Symlink assets into build directory
 add_custom_command(TARGET VulkanDeferred POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E create_symlink
         ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:VulkanDeferred>/assets

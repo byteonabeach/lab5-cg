@@ -3,6 +3,8 @@
 #include "Light.h"
 #include "Camera.h"
 #include "Input.h"
+#include "Culling.h"
+#include "Octree.h"
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
@@ -20,6 +22,12 @@ struct FallingFlashlight {
     glm::vec3 velocity;
     glm::vec3 color;
     SceneObject object;
+};
+
+enum CullingMode {
+    CULLING_NONE = 0,
+    CULLING_BRUTE_FORCE = 1,
+    CULLING_OCTREE = 2
 };
 
 static std::string normSlashes(std::string p) {
@@ -56,6 +64,7 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
 
     SceneObject obj;
     obj.animatable = animatable;
+
     for (const auto& shape : shapes) {
         std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches;
         size_t off = 0;
@@ -66,6 +75,9 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
                 tinyobj::index_t idx = shape.mesh.indices[off + v];
                 Vertex vert{};
                 vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
+
+                obj.localBounds.expand(vert.pos);
+
                 if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
                 if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]};
                 inds.push_back((uint32_t)verts.size());
@@ -147,7 +159,7 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath, bool anim
     return obj;
 }
 
-static MeshHandle createCubeMesh(Engine& engine) {
+static MeshHandle createCubeMesh(Engine& engine, AABB& outBounds) {
     std::vector<Vertex> v = {
         {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,-1,-1}, {0,0,-1}, {1,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,-1,-1}, {0,0,-1}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,0,-1}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,0,-1}, {0,1}, {1,0,0}},
         {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,-1,1}, {0,0,1}, {1,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,-1,1}, {0,0,1}, {0,0}, {1,0,0}}, {{1,1,1}, {0,0,1}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,0,1}, {0,1}, {1,0,0}},
@@ -157,14 +169,17 @@ static MeshHandle createCubeMesh(Engine& engine) {
         {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,-1}, {0,1,0}, {1,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,-1}, {0,1,0}, {0,0}, {1,0,0}}, {{1,1,1}, {0,1,0}, {1,1}, {1,0,0}}, {{-1,1,1}, {0,1,0}, {0,1}, {1,0,0}}
     };
     std::vector<uint32_t> i(36);
-    for(uint32_t j=0; j<36; ++j) i[j] = j;
+    for(uint32_t j=0; j<36; ++j) {
+        i[j] = j;
+        outBounds.expand(v[j].pos);
+    }
     return engine.createMesh(v, i);
 }
 
 int main() {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Sponza Tessellation", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Frustum Culling & Octree", nullptr, nullptr);
 
     Input input;
     input.init(window);
@@ -174,42 +189,70 @@ int main() {
     engine.init(window);
     rs.init(engine);
 
-    MeshHandle cubeMesh = createCubeMesh(engine);
-    std::vector<SceneObject> objects;
+    AABB cubeLocalBounds;
+    MeshHandle cubeMesh = createCubeMesh(engine, cubeLocalBounds);
 
+    std::vector<SceneObject> staticObjects;
     std::vector<FallingFlashlight> droppedLights;
+
     bool fPressedLastFrame = false;
+    bool key1Last = false, key2Last = false, key3Last = false;
 
     const float GRAVITY = -9.81f;
     const float FLOOR_Y = 0.05f;
 
-    std::cout << "Loading Sponza..." << std::endl;
+    std::cout << "Loading Sponza..." << '\n';
     try {
         auto sponza = loadOBJ(engine, "assets/sponza.obj", false);
         sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
-        objects.push_back(std::move(sponza));
-        std::cout << "Sponza loaded successfully!" << std::endl;
+        staticObjects.push_back(std::move(sponza));
+        std::cout << "Sponza loaded successfully!" << '\n';
     } catch (const std::exception& e) {
-        std::cerr << "Error loading model: " << e.what() << std::endl;
+        std::cerr << "Error loading model: " << e.what() << '\n';
     }
 
-    for (int i=0; i<3; ++i) {
-        SceneObject cubeLight;
-        SubMesh sm;
-        sm.mesh = cubeMesh;
-        sm.texture = engine.createWhiteTexture();
-        sm.normalMap = engine.createDefaultNormalTexture();
-        sm.dispMap = engine.createBlackTexture();
-        sm.dispScale = 0.0f;
-        sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
-        cubeLight.submeshes.push_back(sm);
-        cubeLight.unlit = true;
-        objects.push_back(cubeLight);
+    std::cout << "Generating 5000 random objects for culling test..." << '\n';
+    SubMesh cubeSubMesh;
+    cubeSubMesh.mesh = cubeMesh;
+    cubeSubMesh.texture = engine.createWhiteTexture();
+    cubeSubMesh.normalMap = engine.createDefaultNormalTexture();
+    cubeSubMesh.dispMap = engine.createBlackTexture();
+    cubeSubMesh.dispScale = 0.0f;
+    cubeSubMesh.matSet = engine.createMaterialSet(cubeSubMesh.texture, cubeSubMesh.normalMap, cubeSubMesh.dispMap);
+
+    for (int i = 0; i < 5000; ++i) {
+        SceneObject cubeObj;
+        cubeObj.submeshes.push_back(cubeSubMesh);
+        cubeObj.unlit = false;
+        cubeObj.localBounds = cubeLocalBounds;
+
+        float rx = ((rand() % 2000) / 10.0f) - 100.0f;
+        float ry = ((rand() % 400) / 10.0f);
+        float rz = ((rand() % 2000) / 10.0f) - 100.0f;
+
+        cubeObj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(rx, ry, rz)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+        cubeObj.unlitColor = glm::vec4((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f, 1.0f);
+
+        staticObjects.push_back(cubeObj);
     }
+    std::cout << "Random objects generated." << '\n';
+
+    std::cout << "Building Octree..." << '\n';
+    Octree sceneOctree;
+    sceneOctree.build(staticObjects);
+    std::cout << "Octree built successfully." << '\n';
 
     Camera camera;
     camera.position = glm::vec3(0.0f, 1.5f, 0.0f);
     double lastTime = glfwGetTime();
+    double statTimer = 0.0;
+
+    CullingMode currentMode = CULLING_OCTREE;
+    std::cout << "\nControls:\n"
+              << "[1] No Culling\n"
+              << "[2] Brute-force Frustum Culling\n"
+              << "[3] Octree Frustum Culling\n"
+              << "[F] Drop flashlight\n";
 
     while (!glfwWindowShouldClose(window)) {
         input.update();
@@ -225,7 +268,16 @@ int main() {
         double now = glfwGetTime();
         float dt = (float)(now - lastTime);
         lastTime = now;
+        statTimer += dt;
         camera.update(input, dt);
+
+        bool k1 = input.isKeyDown(GLFW_KEY_1);
+        bool k2 = input.isKeyDown(GLFW_KEY_2);
+        bool k3 = input.isKeyDown(GLFW_KEY_3);
+        if (k1 && !key1Last) currentMode = CULLING_NONE;
+        if (k2 && !key2Last) currentMode = CULLING_BRUTE_FORCE;
+        if (k3 && !key3Last) currentMode = CULLING_OCTREE;
+        key1Last = k1; key2Last = k2; key3Last = k3;
 
         bool fIsDown = input.isKeyDown(GLFW_KEY_F);
         if (fIsDown && !fPressedLastFrame) {
@@ -234,17 +286,10 @@ int main() {
             fl.velocity = camera.front() * 10.0f;
             fl.color = glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f) * 2.0f + 0.5f;
 
-            SubMesh sm;
-            sm.mesh = cubeMesh;
-            sm.texture = engine.createWhiteTexture();
-            sm.normalMap = engine.createDefaultNormalTexture();
-            sm.dispMap = engine.createBlackTexture();
-            sm.dispScale = 0.0f;
-            sm.matSet = engine.createMaterialSet(sm.texture, sm.normalMap, sm.dispMap);
-
-            fl.object.submeshes.push_back(sm);
+            fl.object.submeshes.push_back(cubeSubMesh);
             fl.object.unlit = true;
             fl.object.unlitColor = glm::vec4(fl.color, 1.0f);
+            fl.object.localBounds = cubeLocalBounds;
             droppedLights.push_back(fl);
         }
         fPressedLastFrame = fIsDown;
@@ -276,17 +321,40 @@ int main() {
         if (allLights.size() > 64) allLights.resize(64);
         rs.setLights(allLights);
 
-        for(size_t i=0; i<3; ++i) {
-            size_t objIdx = objects.size() - 3 + i;
-            if (objIdx < objects.size() && i + 1 < allLights.size()) {
-                objects[objIdx].transform = glm::translate(glm::mat4(1.0f), glm::vec3(allLights[i+1].position)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
-                objects[objIdx].unlitColor = allLights[i+1].color * 3.0f;
+        auto ext = engine.getSwapExtent();
+        glm::mat4 viewProj = camera.projection((float)ext.width / (float)ext.height) * camera.view();
+        Frustum cameraFrustum;
+        cameraFrustum.extract(viewProj);
+
+        std::vector<const SceneObject*> visibleObjects;
+
+        if (currentMode == CULLING_NONE) {
+            for (const auto& obj : staticObjects) visibleObjects.push_back(&obj);
+        }
+        else if (currentMode == CULLING_BRUTE_FORCE) {
+            for (const auto& obj : staticObjects) {
+                if (cameraFrustum.intersects(obj.getWorldBounds())) {
+                    visibleObjects.push_back(&obj);
+                }
+            }
+        }
+        else if (currentMode == CULLING_OCTREE) {
+            sceneOctree.query(cameraFrustum, visibleObjects);
+        }
+
+        for (const auto& fl : droppedLights) {
+            if (currentMode == CULLING_NONE || cameraFrustum.intersects(fl.object.getWorldBounds())) {
+                visibleObjects.push_back(&fl.object);
             }
         }
 
-        std::vector<SceneObject> frameObjects = objects;
-        for (const auto& fl : droppedLights) {
-            frameObjects.push_back(fl.object);
+        if (statTimer >= 1.0) {
+            statTimer = 0.0;
+            const char* modeStr = (currentMode == CULLING_NONE) ? "NONE" :
+                                  (currentMode == CULLING_BRUTE_FORCE) ? "BRUTE-FORCE" : "OCTREE";
+            std::cout << "Mode: " << modeStr
+                      << " | Visible: " << visibleObjects.size()
+                      << " / " << (staticObjects.size() + droppedLights.size()) << "\n";
         }
 
         FrameContext ctx = engine.beginFrame();
@@ -297,7 +365,7 @@ int main() {
             continue;
         }
 
-        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, frameObjects, engine, (float)now);
+        rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, camera, visibleObjects, engine, (float)now);
         engine.endFrame(ctx);
     }
 

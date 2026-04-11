@@ -67,7 +67,7 @@ void RenderingSystem::onResize(Engine& engine) {
     updateLightDescSets_(engine);
 }
 
-void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<SceneObject>& objects, Engine& engine, float time) {
+void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time) {
     auto ext = engine.getSwapExtent();
 
     GeomUBO gubo{};
@@ -99,12 +99,12 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
             VkViewport vp{0, 0, 2048.0f, 2048.0f, 0.0f, 1.0f}; VkRect2D sc{{0, 0}, {2048, 2048}};
             vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
-            for (const auto& obj : objects) {
-                if (obj.unlit) continue;
-                for (const auto& sm : obj.submeshes) {
+            for (const auto* obj : objects) {
+                if (obj->unlit) continue;
+                for (const auto& sm : obj->submeshes) {
                     if (!sm.mesh.valid()) continue;
                     ShadowPC spc{};
-                    spc.model = obj.transform; spc.lightSpace = pendingLights[i].lightSpace;
+                    spc.model = obj->transform; spc.lightSpace = pendingLights[i].lightSpace;
                     vkCmdPushConstants(cmd, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowPC), &spc);
                     engine.bindAndDrawMesh_(cmd, sm.mesh);
                 }
@@ -127,13 +127,13 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     vkCmdSetViewport(cmd, 0, 1, &vp); vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 0, 1, &geomDescSets[frameIndex], 0, nullptr);
 
-    for (const auto& obj : objects) {
-        for (const auto& sm : obj.submeshes) {
+    for (const auto* obj : objects) {
+        for (const auto& sm : obj->submeshes) {
             if (!sm.mesh.valid()) continue;
             GeomPC gpc{};
-            gpc.model = obj.transform;
-            gpc.color = obj.unlitColor;
-            gpc.isUnlit = obj.unlit ? 1 : 0;
+            gpc.model = obj->transform;
+            gpc.color = obj->unlitColor;
+            gpc.isUnlit = obj->unlit ? 1 : 0;
             gpc.dispScale = sm.dispScale;
             gpc.time = time;
             gpc.isCurtain = sm.isCurtain ? 1 : 0;
@@ -143,7 +143,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
                 VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(GeomPC), &gpc);
 
-            if (!obj.unlit && sm.matSet != VK_NULL_HANDLE) {
+            if (!obj->unlit && sm.matSet != VK_NULL_HANDLE) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &sm.matSet, 0, nullptr);
             }
             engine.bindAndDrawMesh_(cmd, sm.mesh);
