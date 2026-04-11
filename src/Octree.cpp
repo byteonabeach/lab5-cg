@@ -2,20 +2,36 @@
 #include "Engine.h"
 
 void Octree::build(const std::vector<SceneObject>& allObjects) {
+    root.reset();
     if (allObjects.empty()) return;
 
     AABB sceneBounds;
     for (const auto& obj : allObjects) {
         sceneBounds.expand(obj.worldBounds);
     }
-
     sceneBounds.minVal -= glm::vec3(0.1f);
     sceneBounds.maxVal += glm::vec3(0.1f);
 
     root = std::make_unique<OctreeNode>(sceneBounds);
-
     for (const auto& obj : allObjects) {
         insert(root.get(), &obj, obj.worldBounds, 0);
+    }
+}
+
+void Octree::buildFromPointers(const std::vector<const SceneObject*>& objectPtrs) {
+    root.reset();
+    if (objectPtrs.empty()) return;
+
+    AABB sceneBounds;
+    for (const auto* obj : objectPtrs) {
+        sceneBounds.expand(obj->worldBounds);
+    }
+    sceneBounds.minVal -= glm::vec3(0.1f);
+    sceneBounds.maxVal += glm::vec3(0.1f);
+
+    root = std::make_unique<OctreeNode>(sceneBounds);
+    for (const auto* obj : objectPtrs) {
+        insert(root.get(), obj, obj->worldBounds, 0);
     }
 }
 

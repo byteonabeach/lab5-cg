@@ -41,6 +41,7 @@ public:
     std::unique_ptr<OctreeNode> root;
 
     void build(const std::vector<SceneObject>& allObjects);
+    void buildFromPointers(const std::vector<const SceneObject*>& objectPtrs);
     void query(const Frustum& frustum, std::vector<const SceneObject*>& result, uint32_t frameId) const;
     void getActiveNodes(std::vector<AABB>& outNodes) const;
 
