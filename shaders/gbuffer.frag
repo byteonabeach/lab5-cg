@@ -4,13 +4,12 @@ layout(location = 0) in vec3 inWorldPos;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec3 inTangent;
+layout(location = 4) in vec4 inColor;
 
 layout(set = 1, binding = 0) uniform sampler2D diffuseTex;
 layout(set = 1, binding = 1) uniform sampler2D normalTex;
 
 layout(push_constant) uniform PushConstants {
-    mat4 model;
-    vec4 color;
     int isUnlit;
     float dispScale;
     float time;
@@ -22,8 +21,8 @@ layout(location = 1) out vec4 gAlbedo;
 
 void main() {
     if (pc.isUnlit != 0) {
-        gNormal = vec4(0.0);
-        gAlbedo = pc.color;
+        gNormal = vec4(0.0, 0.0, 0.0, 0.0);
+        gAlbedo = inColor;
         return;
     }
 
@@ -32,7 +31,6 @@ void main() {
 
     vec3 N = normalize(inNormal);
     vec3 T = normalize(inTangent);
-
     T = normalize(T - dot(T, N) * N);
     vec3 B = cross(N, T);
     mat3 TBN = mat3(T, B, N);

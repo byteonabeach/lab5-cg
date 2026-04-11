@@ -1,5 +1,4 @@
 #pragma once
-
 #include "Engine.h"
 #include "GBuffer.h"
 #include "Light.h"
@@ -24,25 +23,18 @@ public:
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
-    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& debugBoxes = {});
+    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {});
 
 private:
     GBuffer gbuffer;
-
-    struct GeomUBO {
-        glm::mat4 view;
-        glm::mat4 proj;
-        glm::vec4 cameraPos;
-    };
-
-    static constexpr int MAX_INSTANCES = 20000;
+    struct GeomUBO { glm::mat4 view, proj; glm::vec4 cameraPos; };
+    static constexpr int MAX_INSTANCES = 40000;
     std::vector<VkBuffer> instanceBufs;
     std::vector<VkDeviceMemory> instanceMems;
     std::vector<void*> instanceMapped;
     void createInstanceBuffers_(Engine& engine);
 
     std::vector<RenderBatch> activeBatches;
-
     VkDescriptorSetLayout geomUBOLayout = VK_NULL_HANDLE;
     VkPipelineLayout geomPipelineLayout = VK_NULL_HANDLE;
     VkPipeline geomPipeline = VK_NULL_HANDLE;
@@ -73,7 +65,6 @@ private:
     std::vector<VkImageView> shadowLayerViews;
     std::vector<VkFramebuffer> shadowFramebuffers;
     VkSampler shadowSampler = VK_NULL_HANDLE;
-
     std::vector<LightData> pendingLights;
 
     void createShadowResources_(Engine& engine);
