@@ -14,12 +14,26 @@ layout(push_constant) uniform PushConstants {
     float dispScale;
     float time;
     int isCurtain;
+    int isTransparent;
 } pc;
 
 layout(location = 0) out vec4 gNormal;
 layout(location = 1) out vec4 gAlbedo;
 
 void main() {
+    if (pc.isTransparent != 0) {
+        const int dither[16] = int[16](
+                0, 8, 2, 10,
+                12, 4, 14, 6,
+                3, 11, 1, 9,
+                15, 7, 13, 5
+            );
+        int x = int(gl_FragCoord.x) % 4;
+        int y = int(gl_FragCoord.y) % 4;
+        float limit = (float(dither[y * 4 + x]) + 0.5) / 16.0;
+        if (0.5 < limit) discard;
+    }
+
     if (pc.isUnlit != 0) {
         gNormal = vec4(0.0, 0.0, 0.0, 0.0);
         gAlbedo = inColor;

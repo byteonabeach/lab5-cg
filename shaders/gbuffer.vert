@@ -21,6 +21,7 @@ layout(push_constant) uniform PushConstants {
     float dispScale;
     float time;
     int isCurtain;
+    int isTransparent;
 } pc;
 
 layout(location = 0) out vec3 outWorldPos;

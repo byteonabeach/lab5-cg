@@ -270,9 +270,11 @@ void Engine::createDevice_() {
         qi.queueFamilyIndex = f; qi.queueCount = 1; qi.pQueuePriorities = &prio;
         qcis.push_back(qi);
     }
+
     VkPhysicalDeviceFeatures features{};
     features.samplerAnisotropy = VK_TRUE;
     features.tessellationShader = VK_TRUE;
+    features.geometryShader = VK_TRUE;
     features.fillModeNonSolid = VK_TRUE;
 
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};

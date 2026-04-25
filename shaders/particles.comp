@@ -1,0 +1,88 @@
+#version 450
+layout(local_size_x = 64) in;
+
+struct Particle {
+    vec3 pos;
+    float life;
+    vec3 vel;
+    float maxLife;
+    vec4 color;
+};
+
+layout(set = 0, binding = 0) buffer InBuf {
+    uint inVertexCount;
+    uint inInstanceCount;
+    uint inFirstVertex;
+    uint inFirstInstance;
+    Particle inParticles[];
+};
+
+layout(set = 0, binding = 1) buffer OutBuf {
+    uint outVertexCount;
+    uint outInstanceCount;
+    uint outFirstVertex;
+    uint outFirstInstance;
+    Particle outParticles[];
+};
+
+layout(push_constant) uniform Push {
+    float dt;
+    float time;
+    int spawnCount;
+    int maxParticles;
+    vec4 emitterPos;
+    vec4 spherePos;
+} push;
+
+float hash(uint n) {
+    n = (n << 13U) ^ n;
+    n = n * (n * n * 15731U + 789221U) + 1376312589U;
+    return float(n & uvec3(0x7fffffffU)) / float(0x7fffffff);
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= push.maxParticles) return;
+
+    Particle p;
+    bool valid = false;
+
+    if (id < inVertexCount) {
+        p = inParticles[id];
+
+        p.life -= push.dt;
+        p.vel.y -= 9.81 * push.dt;
+        p.pos += p.vel * push.dt;
+
+        vec3 diff = p.pos - push.spherePos.xyz;
+        float dist = length(diff);
+        if (dist < push.spherePos.w) {
+            vec3 n = diff / dist;
+            p.pos = push.spherePos.xyz + n * push.spherePos.w;
+            p.vel = reflect(p.vel, n) * 0.7;
+        }
+
+        if (p.pos.y < 0.1) {
+            p.pos.y = 0.1;
+            p.vel.y *= -0.5;
+            p.vel.xz *= 0.8;
+        }
+
+        if (p.life > 0.0) valid = true;
+    } else if (id < inVertexCount + push.spawnCount) {
+        uint seed = id + uint(push.time * 100000.0);
+        p.pos = push.emitterPos.xyz + vec3(hash(seed) - 0.5, hash(seed + 1) - 0.5, hash(seed + 2) - 0.5) * 0.5;
+        p.vel = vec3((hash(seed + 3) - 0.5) * 4.0, hash(seed + 4) * 8.0 + 3.0, (hash(seed + 5) - 0.5) * 4.0);
+        p.maxLife = hash(seed + 6) * 2.5 + 1.5;
+        p.life = p.maxLife;
+        p.color = vec4(hash(seed + 7), hash(seed + 8) * 0.5 + 0.5, hash(seed + 9), 1.0);
+        valid = true;
+    }
+
+    if (valid) {
+        uint outId = atomicAdd(outVertexCount, 1);
+        if (outId < push.maxParticles) {
+            outParticles[outId] = p;
+        }
+    }
+}

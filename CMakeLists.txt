@@ -51,7 +51,6 @@ target_compile_definitions(VulkanDeferred PRIVATE
     $<$<CONFIG:Debug>:ENABLE_VALIDATION_LAYERS>
 )
 
-
 find_program(GLSLC glslc HINTS ENV VULKAN_SDK PATH_SUFFIXES bin)
 if(NOT GLSLC)
   message(FATAL_ERROR "glslc not found — install Vulkan SDK")
@@ -71,6 +70,12 @@ set(SHADERS
     phong.vert
     phong.frag
     shadows.vert
+    shadows.geom
+    particles.comp
+    particles_reset.comp
+    particles.vert
+    particles.geom
+    particles.frag
 )
 
 foreach(SHADER ${SHADERS})

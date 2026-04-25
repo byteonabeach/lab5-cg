@@ -22,12 +22,19 @@ end
 before_build(function(target)
     local shaderdir = path.join(target:targetdir(), "shaders")
     os.mkdir(shaderdir)
-    local shaders = { "phong.vert", "phong.frag" }
+    local shaders = {
+        "gbuffer.vert", "gbuffer.tesc", "gbuffer.tese", "gbuffer.frag",
+        "lighting.vert", "lighting.frag",
+        "phong.vert", "phong.frag",
+        "shadows.vert", "shadows.geom"
+    }
     for _, s in ipairs(shaders) do
         local src = path.join("shaders", s)
-        local out = path.join(shaderdir, s:gsub("%.", "_") .. ".spv")
+        local out1 = path.join(shaderdir, s:gsub("%.", "_") .. ".spv")
+        local out2 = path.join(shaderdir, s .. ".spv")
         if os.isfile(src) then
-            os.execv("glslc", { src, "-o", out })
+            os.execv("glslc", { src, "-o", out1 })
+            os.execv("glslc", { src, "-o", out2 })
         end
     end
 end)

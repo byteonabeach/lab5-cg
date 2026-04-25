@@ -9,6 +9,8 @@
 #include <tiny_obj_loader.h>
 #include <filesystem>
 #include <iostream>
+#include <cmath>
+
 namespace fs = std::filesystem;
 
 struct FallingFlashlight { glm::vec3 position, velocity, color; SceneObject object; };
@@ -35,7 +37,7 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
                 if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]}; inds.push_back((uint32_t)verts.size()); verts.push_back(vert);
             } off += 3;
         }
-        for (auto& [matID, pair] : batches) {
+        for (auto&[matID, pair] : batches) {
             auto& [verts, inds] = pair; for (size_t i = 0; i < inds.size(); i += 3) {
                 Vertex &v0 = verts[inds[i]], &v1 = verts[inds[i+1]], &v2 = verts[inds[i+2]]; glm::vec3 e1 = v1.pos - v0.pos, e2 = v2.pos - v0.pos; glm::vec2 duv1 = v1.texCoord - v0.texCoord, duv2 = v2.texCoord - v0.texCoord;
                 float f = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y + 0.0001f); glm::vec3 t = glm::normalize(f * (duv2.y * e1 - duv1.y * e2)); v0.tangent = v1.tangent = v2.tangent = t;
@@ -66,6 +68,40 @@ static MeshHandle createCubeMesh(Engine& engine, AABB& out) {
     return engine.createMesh(v, inds);
 }
 
+static MeshHandle createSphereMesh(Engine& engine, AABB& out, int sectors, int stacks, float radius) {
+    std::vector<Vertex> v; std::vector<uint32_t> inds;
+    for(int i = 0; i <= stacks; ++i) {
+        float V = (float)i / stacks;
+        float phi = V * glm::pi<float>();
+        for(int j = 0; j <= sectors; ++j) {
+            float U = (float)j / sectors;
+            float theta = U * 2.0f * glm::pi<float>();
+            float x = radius * cos(theta) * sin(phi);
+            float y = radius * cos(phi);
+            float z = radius * sin(theta) * sin(phi);
+            Vertex vt{};
+            vt.pos = {x, y, z};
+            vt.normal = glm::vec3(x, y, z);
+            if(glm::length(vt.normal) < 0.001f) vt.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            else vt.normal = glm::normalize(vt.normal);
+            vt.texCoord = {U, V};
+            glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+            if (std::abs(vt.normal.y) > 0.999f) up = glm::vec3(1.0f, 0.0f, 0.0f);
+            vt.tangent = glm::normalize(glm::cross(up, vt.normal));
+            v.push_back(vt);
+            out.expand(vt.pos);
+        }
+    }
+    for(int i = 0; i < stacks; ++i) {
+        for(int j = 0; j < sectors; ++j) {
+            uint32_t first = (i * (sectors + 1)) + j;
+            uint32_t second = first + sectors + 1;
+            inds.insert(inds.end(), {first, second, first + 1, second, second + 1, first + 1});
+        }
+    }
+    return engine.createMesh(v, inds);
+}
+
 int main() {
     const float GRAV = -9.81f, FLOOR = 0.05f; glfwInit(); glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Octree Debugger", nullptr, nullptr);
@@ -75,18 +111,33 @@ int main() {
     auto sponza = loadOBJ(eng, "assets/sponza.obj"); sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f)); sponza.updateWorldBounds(); statObjs.push_back(std::move(sponza));
     SubMesh cubeSM{cube, eng.createWhiteTexture(), eng.createDefaultNormalTexture(), eng.createBlackTexture()};
     cubeSM.matSet = eng.createMaterialSet(cubeSM.texture, cubeSM.normalMap, cubeSM.dispMap);
+
+    AABB sphereBounds;
+    MeshHandle sphere = createSphereMesh(eng, sphereBounds, 32, 32, 2.0f);
+    SubMesh sphereSM{sphere, eng.createWhiteTexture(), eng.createDefaultNormalTexture(), eng.createBlackTexture()};
+    sphereSM.matSet = eng.createMaterialSet(sphereSM.texture, sphereSM.normalMap, sphereSM.dispMap);
+    SceneObject sphereObj;
+    sphereObj.submeshes.push_back(sphereSM);
+    sphereObj.localBounds = sphereBounds;
+    sphereObj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 7.0f, 0.0f));
+    sphereObj.updateWorldBounds();
+    sphereObj.isTransparent = true;
+    sphereObj.unlit = true;
+    sphereObj.unlitColor = glm::vec4(0.1f, 0.5f, 1.0f, 0.5f);
+    statObjs.push_back(sphereObj);
+
     for (int i = 0; i < 5000; ++i) { SceneObject c; c.submeshes.push_back(cubeSM); c.localBounds = cubeBounds; c.transform = glm::translate(glm::mat4(1.0f), glm::vec3(((rand()%2000)/10.f)-100.f, (rand()%400)/10.f, ((rand()%2000)/10.f)-100.f)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f)); c.updateWorldBounds(); statObjs.push_back(c); }
     Octree statTree; statTree.build(statObjs); Octree dynTree;
-    Camera cam; cam.position = {0, 1.5f, 0}; double last = glfwGetTime(); uint32_t fid = 1; bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false; CullingMode mode = CULLING_OCTREE;
-    std::cout << "Controls: [1-3] Culling Mode, [4] Toggle Octree Grid, [F] Drop Light" << std::endl;
+    Camera cam; cam.position = {0.0f, 10.0f, 25.0f}; cam.pitch = -15.0f; double last = glfwGetTime(); uint32_t fid = 1; bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false; CullingMode mode = CULLING_OCTREE;
+    std::cout << "Controls:[1-3] Culling Mode, [4] Toggle Octree Grid,[F] Drop Light\n";
     while (!glfwWindowShouldClose(window)) {
         in.update(); if (in.wasResized()) { eng.recreateSwapchain(); rs.onResize(eng); in.clearResized(); }
         double now = glfwGetTime(); float dt = (float)(now - last); last = now; cam.update(in, dt);
-        if (in.isKeyDown(GLFW_KEY_1) && !k1L) { mode = CULLING_NONE; std::cout << "Mode: No Culling" << std::endl; } k1L=in.isKeyDown(GLFW_KEY_1);
-        if (in.isKeyDown(GLFW_KEY_2) && !k2L) { mode = CULLING_BRUTE_FORCE; std::cout << "Mode: Brute Force Frustum Culling" << std::endl; } k2L=in.isKeyDown(GLFW_KEY_2);
-        if (in.isKeyDown(GLFW_KEY_3) && !k3L) { mode = CULLING_OCTREE; std::cout << "Mode: Octree Optimized Culling" << std::endl; } k3L=in.isKeyDown(GLFW_KEY_3);
-        if (in.isKeyDown(GLFW_KEY_4) && !k4Last) { drawDbg = !drawDbg; std::cout << "Debug Grid: " << (drawDbg ? "ENABLED" : "DISABLED") << std::endl; } k4Last = in.isKeyDown(GLFW_KEY_4);
-        if (in.isKeyDown(GLFW_KEY_F) && !fLast) { std::cout << "Dropped Flashlight" << std::endl; FallingFlashlight fl{cam.position, cam.front()*12.f, glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f)*3.f}; fl.object.submeshes.push_back(cubeSM); fl.object.unlit = true; fl.object.unlitColor = glm::vec4(fl.color, 1.f); fl.object.localBounds = cubeBounds; fl.object.updateWorldBounds(); dynLights.push_back(fl); }
+        if (in.isKeyDown(GLFW_KEY_1) && !k1L) { mode = CULLING_NONE; std::cout << "Mode: No Culling\n"; } k1L=in.isKeyDown(GLFW_KEY_1);
+        if (in.isKeyDown(GLFW_KEY_2) && !k2L) { mode = CULLING_BRUTE_FORCE; std::cout << "Mode: Brute Force Frustum Culling\n"; } k2L=in.isKeyDown(GLFW_KEY_2);
+        if (in.isKeyDown(GLFW_KEY_3) && !k3L) { mode = CULLING_OCTREE; std::cout << "Mode: Octree Optimized Culling\n"; } k3L=in.isKeyDown(GLFW_KEY_3);
+        if (in.isKeyDown(GLFW_KEY_4) && !k4Last) { drawDbg = !drawDbg; std::cout << "Debug Grid: " << (drawDbg ? "ENABLED" : "DISABLED") << "\n"; } k4Last = in.isKeyDown(GLFW_KEY_4);
+        if (in.isKeyDown(GLFW_KEY_F) && !fLast) { std::cout << "Dropped Flashlight\n"; FallingFlashlight fl{cam.position, cam.front()*12.f, glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f)*3.f}; fl.object.submeshes.push_back(cubeSM); fl.object.unlit = true; fl.object.unlitColor = glm::vec4(fl.color, 1.f); fl.object.localBounds = cubeBounds; fl.object.updateWorldBounds(); dynLights.push_back(fl); }
         fLast = in.isKeyDown(GLFW_KEY_F);
         std::vector<const SceneObject*> dynPtrs; for (auto& fl : dynLights) { if (fl.position.y > FLOOR) { fl.velocity.y += GRAV * dt; fl.position += fl.velocity * dt; fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f)); fl.object.updateWorldBounds(); } dynPtrs.push_back(&fl.object); }
         if (mode == CULLING_OCTREE) dynTree.buildFromPointers(dynPtrs);

@@ -12,6 +12,7 @@ struct RenderBatch {
     glm::vec4 unlitColor;
     float dispScale;
     bool isCurtain;
+    bool isTransparent;
     uint32_t instanceOffset;
     uint32_t instanceCount;
     std::vector<InstanceData> instances;
@@ -24,7 +25,6 @@ public:
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
     void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {});
-
 private:
     GBuffer gbuffer;
     struct GeomUBO { glm::mat4 view, proj; glm::vec4 cameraPos; };
@@ -33,8 +33,8 @@ private:
     std::vector<VkDeviceMemory> instanceMems;
     std::vector<void*> instanceMapped;
     void createInstanceBuffers_(Engine& engine);
-
     std::vector<RenderBatch> activeBatches;
+
     VkDescriptorSetLayout geomUBOLayout = VK_NULL_HANDLE;
     VkPipelineLayout geomPipelineLayout = VK_NULL_HANDLE;
     VkPipeline geomPipeline = VK_NULL_HANDLE;
@@ -59,13 +59,42 @@ private:
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
-    VkImage shadowImage = VK_NULL_HANDLE;
-    VkDeviceMemory shadowMemory = VK_NULL_HANDLE;
-    VkImageView shadowArrayView = VK_NULL_HANDLE;
-    std::vector<VkImageView> shadowLayerViews;
-    std::vector<VkFramebuffer> shadowFramebuffers;
     VkSampler shadowSampler = VK_NULL_HANDLE;
     std::vector<LightData> pendingLights;
+    VkDescriptorSetLayout shadowDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool shadowDescPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> shadowDescSets;
+    std::vector<VkBuffer> shadowUBOBufs;
+    std::vector<VkDeviceMemory> shadowUBOMems;
+    std::vector<void*> shadowUBOMapped;
+
+    std::vector<VkImage> shadowImages;
+    std::vector<VkDeviceMemory> shadowMemories;
+    std::vector<VkImageView> shadowArrayViews;
+    std::vector<VkFramebuffer> shadowFramebuffers;
+
+    VkDescriptorSetLayout particleComputeLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout particleResetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout particleGraphicsLayout = VK_NULL_HANDLE;
+
+    VkPipelineLayout particleComputePipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout particleResetPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout particleGraphicsPipelineLayout = VK_NULL_HANDLE;
+
+    VkPipeline particleComputePipeline = VK_NULL_HANDLE;
+    VkPipeline particleResetPipeline = VK_NULL_HANDLE;
+    VkPipeline particleGraphicsPipeline = VK_NULL_HANDLE;
+
+    VkBuffer particleBuffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory particleMemories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+
+    VkDescriptorPool particleDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet particleComputeSets[2];
+    VkDescriptorSet particleResetSets[2];
+    VkDescriptorSet particleGraphicsSets[2];
+
+    int particleFrameIndex = 0;
+    float lastTime = 0.0f;
 
     void createShadowResources_(Engine& engine);
     void createShadowPipeline_(Engine& engine);
@@ -77,5 +106,9 @@ private:
     void createDescriptors_(Engine& engine);
     void updateLightDescSets_(Engine& engine);
     void cleanupFramebuffers_(VkDevice device);
+
+    void createParticleResources_(Engine& engine);
+    void createParticlePipelines_(Engine& engine);
+
     VkPipelineShaderStageCreateInfo loadShader_(Engine& engine, const std::string& path, VkShaderStageFlagBits stage);
 };

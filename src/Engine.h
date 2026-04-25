@@ -76,6 +76,7 @@ struct SceneObject {
     bool animatable = false;
     int animFrame = 0;
     bool unlit = false;
+    bool isTransparent = false;
     glm::vec4 unlitColor = {1,1,1,1};
     mutable uint32_t lastQueryFrame = 0;
 

@@ -19,6 +19,7 @@ layout(push_constant) uniform PushConstants {
     float dispScale;
     float time;
     int isCurtain;
+    int isTransparent;
 } pc;
 
 layout(set = 0, binding = 0) uniform GeomUBO {
