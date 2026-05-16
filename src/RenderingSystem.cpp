@@ -2,6 +2,8 @@
 #include <array>
 #include <iostream>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
 
 struct GeomPC {
     int isUnlit;
@@ -108,18 +110,75 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     auto ext = engine.getSwapExtent();
     GeomUBO gubo{ camera.view(), camera.projection((float)ext.width/(float)ext.height), glm::vec4(camera.position, 1.0f) };
     memcpy(geomUBOMapped[frameIndex], &gubo, sizeof(GeomUBO));
-    LightsUBO lubo{ glm::vec4(camera.position, 1.0f), glm::vec4(0.08f, 0.08f, 0.10f, 1.0f), { (int)std::min((int)pendingLights.size(), MAX_LIGHTS), 0,0,0 }, glm::inverse(gubo.proj * gubo.view) };
-    for (int i = 0; i < lubo.countPad.x; ++i) lubo.lights[i] = pendingLights[i];
-    memcpy(lightUBOMapped[frameIndex], &lubo, sizeof(LightsUBO));
+    LightsUBO lubo{ glm::vec4(camera.position, 1.0f), glm::vec4(0.08f, 0.08f, 0.10f, 1.0f), { (int)std::min((size_t)MAX_LIGHTS, pendingLights.size()), 0,0,0 }, glm::inverse(gubo.proj * gubo.view) };
 
-    for(int i=0; i<4; ++i) {
-        if(i < pendingLights.size() && pendingLights[i].params2.x > 0.5f) {
-            for(int c=0; c<4; ++c) {
-                ((glm::mat4*)shadowUBOMapped[frameIndex])[c] = pendingLights[i].cascadeMatrices[c];
+    for (int i = 0; i < lubo.countPad.x; ++i) {
+        lubo.lights[i] = pendingLights[i];
+        if (lubo.lights[i].params2.x > 0.5f) {
+            float cameraNear = 0.1f;
+            float cameraFar = 1000.0f;
+            float shadowFar = 150.0f;
+            float cascadeSplits[4];
+            float ratio = shadowFar / cameraNear;
+            for (int c = 0; c < 4; c++) {
+                float p = (c + 1) / 4.0f;
+                float logScale = cameraNear * std::pow(ratio, p);
+                float linScale = cameraNear + (shadowFar - cameraNear) * p;
+                cascadeSplits[c] = 0.75f * logScale + 0.25f * linScale;
             }
-            break;
+
+            glm::vec3 originalCorners[8] = {
+                glm::vec3(-1.0f,  1.0f, 0.0f), glm::vec3( 1.0f,  1.0f, 0.0f),
+                glm::vec3( 1.0f, -1.0f, 0.0f), glm::vec3(-1.0f, -1.0f, 0.0f),
+                glm::vec3(-1.0f,  1.0f, 1.0f), glm::vec3( 1.0f,  1.0f, 1.0f),
+                glm::vec3( 1.0f, -1.0f, 1.0f), glm::vec3(-1.0f, -1.0f, 1.0f),
+            };
+            glm::mat4 invCam = glm::inverse(camera.projection((float)ext.width/(float)ext.height) * camera.view());
+            for (int j = 0; j < 8; j++) {
+                glm::vec4 invCorner = invCam * glm::vec4(originalCorners[j], 1.0f);
+                originalCorners[j] = glm::vec3(invCorner) / invCorner.w;
+            }
+
+            float lastSplitDist = cameraNear;
+            for (int c = 0; c < 4; c++) {
+                float splitDist = cascadeSplits[c];
+                glm::vec3 frustumCorners[8];
+                for (int j = 0; j < 4; j++) {
+                    glm::vec3 dist = originalCorners[j + 4] - originalCorners[j];
+                    frustumCorners[j + 4] = originalCorners[j] + dist * ((splitDist - cameraNear) / (cameraFar - cameraNear));
+                    frustumCorners[j] = originalCorners[j] + dist * ((lastSplitDist - cameraNear) / (cameraFar - cameraNear));
+                }
+
+                glm::vec3 frustumCenter = glm::vec3(0.0f);
+                for (int j = 0; j < 8; j++) {
+                    frustumCenter += frustumCorners[j];
+                }
+                frustumCenter /= 8.0f;
+
+                float radius = 0.0f;
+                for (int j = 0; j < 8; j++) {
+                    float distance = glm::length(frustumCorners[j] - frustumCenter);
+                    radius = std::max(radius, distance);
+                }
+                radius = std::ceil(radius * 16.0f) / 16.0f;
+
+                glm::vec3 lightDir = glm::normalize(glm::vec3(lubo.lights[i].direction));
+                glm::vec3 up = (std::abs(lightDir.y) < 0.999f) ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(0.0f, 0.0f, 1.0f);
+
+                float zMultiplier = 10.0f;
+                glm::mat4 lightViewMatrix = glm::lookAt(frustumCenter - lightDir * (radius * zMultiplier), frustumCenter, up);
+                glm::mat4 lightOrthoMatrix = glm::ortho(-radius, radius, -radius, radius, 0.0f, radius * (1.0f + zMultiplier));
+                lightOrthoMatrix[1][1] *= -1.0f;
+
+                lubo.lights[i].cascadeMatrices[c] = lightOrthoMatrix * lightViewMatrix;
+                lubo.lights[i].cascadeSplits[c] = splitDist;
+                ((glm::mat4*)shadowUBOMapped[frameIndex])[c] = lubo.lights[i].cascadeMatrices[c];
+
+                lastSplitDist = splitDist;
+            }
         }
     }
+    memcpy(lightUBOMapped[frameIndex], &lubo, sizeof(LightsUBO));
 
     activeBatches.clear();
     for (const auto* obj : objects) {

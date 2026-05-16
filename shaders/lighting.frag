@@ -81,8 +81,16 @@ void main() {
             if (projCoords.z > 0.0 && projCoords.z < 1.0 &&
                     projCoords.x > 0.0 && projCoords.x < 1.0 &&
                     projCoords.y > 0.0 && projCoords.y < 1.0) {
-                float pcfDepth = texture(shadowMap, vec3(projCoords.xy, cascadeIndex)).r;
-                shadow = projCoords.z - 0.005 > pcfDepth ? 0.0 : 1.0;
+                float currentDepth = projCoords.z - 0.005;
+                vec2 texelSize = 1.0 / textureSize(shadowMap, 0).xy;
+                shadow = 0.0;
+                for (int x = -1; x <= 1; ++x) {
+                    for (int y = -1; y <= 1; ++y) {
+                        float pcfDepth = texture(shadowMap, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r;
+                        shadow += currentDepth > pcfDepth ? 0.0 : 1.0;
+                    }
+                }
+                shadow /= 9.0;
             }
         }
 
