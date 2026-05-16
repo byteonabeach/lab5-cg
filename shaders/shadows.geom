@@ -2,16 +2,21 @@
 
 layout(triangles, invocations = 4) in;
 layout(triangle_strip, max_vertices = 3) out;
+
 layout(location = 0) in vec3 inWorldPos[];
+layout(location = 1) in vec2 inUV[];
 
 layout(set = 0, binding = 0) uniform ShadowUBO {
     mat4 cascadeMatrices[4];
 } ubo;
 
+layout(location = 0) out vec2 outUV;
+
 void main() {
     gl_Layer = gl_InvocationID;
     for (int j = 0; j < 3; ++j) {
         gl_Position = ubo.cascadeMatrices[gl_InvocationID] * vec4(inWorldPos[j], 1.0);
+        outUV = inUV[j];
         EmitVertex();
     }
     EndPrimitive();

@@ -106,7 +106,7 @@ void RenderingSystem::createInstanceBuffers_(Engine& engine) {
     }
 }
 
-void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh, const std::vector<AABB>& staticNodes, const std::vector<AABB>& dynamicNodes) {
+void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh, const std::vector<AABB>& staticNodes, const std::vector<AABB>& dynamicNodes, bool enableParticles) {
     auto ext = engine.getSwapExtent();
     GeomUBO gubo{ camera.view(), camera.projection((float)ext.width/(float)ext.height), glm::vec4(camera.position, 1.0f) };
     memcpy(geomUBOMapped[frameIndex], &gubo, sizeof(GeomUBO));
@@ -228,29 +228,31 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     pPush.emitterPos = glm::vec4(0.0f, 15.0f, 0.0f, 1.0f);
     pPush.spherePos = glm::vec4(0.0f, 7.0f, 0.0f, 2.0f);
 
-    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    if (enableParticles) {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleResetPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleResetPipelineLayout, 0, 1, &particleResetSets[bufIn], 0, nullptr);
-    vkCmdDispatch(cmd, 1, 1, 1);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleResetPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleResetPipelineLayout, 0, 1, &particleResetSets[bufIn], 0, nullptr);
+        vkCmdDispatch(cmd, 1, 1, 1);
 
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputePipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputePipelineLayout, 0, 1, &particleComputeSets[bufIn], 0, nullptr);
-    vkCmdPushConstants(cmd, particleComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticlePush), &pPush);
-    vkCmdDispatch(cmd, (pPush.maxParticles / 64) + 1, 1, 1);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputePipelineLayout, 0, 1, &particleComputeSets[bufIn], 0, nullptr);
+        vkCmdPushConstants(cmd, particleComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticlePush), &pPush);
+        vkCmdDispatch(cmd, (pPush.maxParticles / 64) + 1, 1, 1);
 
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
 
     for (int i = 0; i < lubo.countPad.x; ++i) {
         if (pendingLights[i].params2.x > 0.5f) {
@@ -264,6 +266,9 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             VkViewport vp{0, 0, 2048, 2048, 0, 1}; vkCmdSetViewport(cmd, 0, 1, &vp);
             VkRect2D sc{{0, 0}, {2048, 2048}}; vkCmdSetScissor(cmd, 0, 1, &sc);
             for (const auto& b : activeBatches) if (!b.isUnlit) {
+                if (b.matSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 1, 1, &b.matSet, 0, nullptr);
+                }
                 engine.bindAndDrawInstanced(cmd, b.mesh, instanceBufs[frameIndex], b.instanceOffset, b.instanceCount);
             }
             vkCmdEndRenderPass(cmd);
@@ -297,10 +302,12 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         if (dCnt > 0) engine.bindAndDrawInstanced(cmd, debugCubeMesh, instanceBufs[frameIndex], dOff, dCnt);
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleGraphicsPipeline);
-    VkDescriptorSet pSets[] = {geomDescSets[frameIndex], particleGraphicsSets[bufOut]};
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleGraphicsPipelineLayout, 0, 2, pSets, 0, nullptr);
-    vkCmdDrawIndirect(cmd, particleBuffers[bufOut], 0, 1, sizeof(uint32_t)*4);
+    if (enableParticles) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleGraphicsPipeline);
+        VkDescriptorSet pSets[] = {geomDescSets[frameIndex], particleGraphicsSets[bufOut]};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleGraphicsPipelineLayout, 0, 2, pSets, 0, nullptr);
+        vkCmdDrawIndirect(cmd, particleBuffers[bufOut], 0, 1, sizeof(uint32_t)*4);
+    }
 
     vkCmdEndRenderPass(cmd);
 
@@ -511,11 +518,13 @@ void RenderingSystem::createShadowPipeline_(Engine& engine) {
     VkDescriptorSetLayoutCreateInfo lci{}; lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; lci.bindingCount = 1; lci.pBindings = &ub;
     vkCreateDescriptorSetLayout(engine.getDevice(), &lci, nullptr, &shadowDescLayout);
 
-    VkPipelineLayoutCreateInfo plci{}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.setLayoutCount = 1; plci.pSetLayouts = &shadowDescLayout;
+    VkDescriptorSetLayout sets[] = {shadowDescLayout, engine.getMaterialLayout()};
+    VkPipelineLayoutCreateInfo plci{}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.setLayoutCount = 2; plci.pSetLayouts = sets;
     vkCreatePipelineLayout(engine.getDevice(), &plci, nullptr, &shadowPipelineLayout);
 
     auto vs = loadShader_(engine, "shaders/shadows.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
     auto gs = loadShader_(engine, "shaders/shadows.geom.spv", VK_SHADER_STAGE_GEOMETRY_BIT);
+    auto fs = loadShader_(engine, "shaders/shadows.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
     auto b0 = Vertex::getBindingDesc(); auto a0 = Vertex::getAttrDescs(); auto b1 = InstanceData::getBindingDesc(); auto a1 = InstanceData::getAttrDescs();
     std::vector<VkVertexInputBindingDescription> binds = {b0, b1}; std::vector<VkVertexInputAttributeDescription> attrs(a0.begin(), a0.end()); attrs.insert(attrs.end(), a1.begin(), a1.end());
 
@@ -526,11 +535,11 @@ void RenderingSystem::createShadowPipeline_(Engine& engine) {
     VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineDepthStencilStateCreateInfo ds{}; ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; ds.depthTestEnable = 1; ds.depthWriteEnable = 1; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR}; VkPipelineDynamicStateCreateInfo dy{}; dy.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dy.dynamicStateCount = 2; dy.pDynamicStates = dyn;
-    VkPipelineShaderStageCreateInfo stages[] = {vs, gs};
+    VkPipelineShaderStageCreateInfo stages[] = {vs, gs, fs};
 
-    VkGraphicsPipelineCreateInfo gci{}; gci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gci.stageCount = 2; gci.pStages = stages; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vp; gci.pRasterizationState = &rs; gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds; gci.pDynamicState = &dy; gci.layout = shadowPipelineLayout; gci.renderPass = shadowRenderPass;
+    VkGraphicsPipelineCreateInfo gci{}; gci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gci.stageCount = 3; gci.pStages = stages; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vp; gci.pRasterizationState = &rs; gci.pMultisampleState = &ms; gci.pDepthStencilState = &ds; gci.pDynamicState = &dy; gci.layout = shadowPipelineLayout; gci.renderPass = shadowRenderPass;
     vkCreateGraphicsPipelines(engine.getDevice(), VK_NULL_HANDLE, 1, &gci, nullptr, &shadowPipeline);
-    vkDestroyShaderModule(engine.getDevice(), vs.module, nullptr); vkDestroyShaderModule(engine.getDevice(), gs.module, nullptr);
+    vkDestroyShaderModule(engine.getDevice(), vs.module, nullptr); vkDestroyShaderModule(engine.getDevice(), gs.module, nullptr); vkDestroyShaderModule(engine.getDevice(), fs.module, nullptr);
 }
 
 void RenderingSystem::createGeomPipeline_(Engine& engine) {

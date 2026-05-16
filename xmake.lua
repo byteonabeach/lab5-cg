@@ -26,7 +26,7 @@ before_build(function(target)
         "gbuffer.vert", "gbuffer.tesc", "gbuffer.tese", "gbuffer.frag",
         "lighting.vert", "lighting.frag",
         "phong.vert", "phong.frag",
-        "shadows.vert", "shadows.geom"
+        "shadows.vert", "shadows.geom", "shadows.frag"
     }
     for _, s in ipairs(shaders) do
         local src = path.join("shaders", s)

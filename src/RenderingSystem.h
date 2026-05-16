@@ -24,7 +24,7 @@ public:
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
-    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {});
+    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {}, bool enableParticles = true);
 private:
     GBuffer gbuffer;
     struct GeomUBO { glm::mat4 view, proj; glm::vec4 cameraPos; };

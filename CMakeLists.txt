@@ -71,6 +71,7 @@ set(SHADERS
     phong.frag
     shadows.vert
     shadows.geom
+    shadows.frag
     particles.comp
     particles_reset.comp
     particles.vert

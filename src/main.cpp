@@ -108,7 +108,12 @@ int main() {
     Input in; in.init(window); Engine eng; RenderingSystem rs; eng.init(window); rs.init(eng);
     AABB cubeBounds; MeshHandle cube = createCubeMesh(eng, cubeBounds);
     std::vector<SceneObject> statObjs; std::vector<FallingFlashlight> dynLights;
-    auto sponza = loadOBJ(eng, "assets/sponza.obj"); sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f)); sponza.updateWorldBounds(); statObjs.push_back(std::move(sponza));
+
+    auto sponza = loadOBJ(eng, "assets/sponza.obj");
+    sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
+    sponza.updateWorldBounds();
+    statObjs.push_back(std::move(sponza));
+
     SubMesh cubeSM{cube, eng.createWhiteTexture(), eng.createDefaultNormalTexture(), eng.createBlackTexture()};
     cubeSM.matSet = eng.createMaterialSet(cubeSM.texture, cubeSM.normalMap, cubeSM.dispMap);
 
@@ -126,10 +131,42 @@ int main() {
     sphereObj.unlitColor = glm::vec4(0.1f, 0.5f, 1.0f, 0.5f);
     statObjs.push_back(sphereObj);
 
-    for (int i = 0; i < 5000; ++i) { SceneObject c; c.submeshes.push_back(cubeSM); c.localBounds = cubeBounds; c.transform = glm::translate(glm::mat4(1.0f), glm::vec3(((rand()%2000)/10.f)-100.f, (rand()%400)/10.f, ((rand()%2000)/10.f)-100.f)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f)); c.updateWorldBounds(); statObjs.push_back(c); }
+    TextureHandle fenceTex = eng.loadTexture("assets/fence.png");
+
+    SubMesh fenceSM{cube, fenceTex, eng.createDefaultNormalTexture(), eng.createBlackTexture()};
+    fenceSM.matSet = eng.createMaterialSet(fenceSM.texture, fenceSM.normalMap, fenceSM.dispMap);
+
+    SceneObject fenceObj;
+    fenceObj.submeshes.push_back(fenceSM);
+    fenceObj.localBounds = cubeBounds;
+
+    fenceObj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 35.0f, 0.0f)) *
+                         glm::scale(glm::mat4(1.0f), glm::vec3(10.0f, 5.0f, 0.1f));
+    fenceObj.updateWorldBounds();
+    statObjs.push_back(fenceObj);
+
+    for (int i = 0; i < 5000; ++i) {
+        SceneObject c;
+        c.submeshes.push_back(cubeSM);
+        c.localBounds = cubeBounds;
+        float rx = ((rand() % 2000) / 10.f) - 100.f;
+        float rz = ((rand() % 2000) / 10.f) - 100.f;
+        if (rx > -25.f && rx < 25.f && rz > -25.f && rz < 25.f) {
+            rx += (rx > 0.f ? 30.f : -30.f);
+            rz += (rz > 0.f ? 30.f : -30.f);
+        }
+        c.transform = glm::translate(glm::mat4(1.0f), glm::vec3(rx, (rand() % 150) / 10.f, rz)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+        c.updateWorldBounds();
+        statObjs.push_back(c);
+    }
+
     Octree statTree; statTree.build(statObjs); Octree dynTree;
-    Camera cam; cam.position = {0.0f, 10.0f, 25.0f}; cam.pitch = -15.0f; double last = glfwGetTime(); uint32_t fid = 1; bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false; CullingMode mode = CULLING_OCTREE;
-    std::cout << "Controls:[1-3] Culling Mode, [4] Toggle Octree Grid,[F] Drop Light\n";
+    Camera cam; cam.position = {0.0f, 45.0f, 15.0f}; cam.pitch = -45.0f; double last = glfwGetTime(); uint32_t fid = 1;
+    bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false, pLast = false;
+    bool enableParticles = true;
+    CullingMode mode = CULLING_OCTREE;
+    std::cout << "Controls: [1-3] Culling Mode, [4] Toggle Octree Grid, [F] Drop Light, [P] Toggle Particles\n";
+
     while (!glfwWindowShouldClose(window)) {
         in.update(); if (in.wasResized()) { eng.recreateSwapchain(); rs.onResize(eng); in.clearResized(); }
         double now = glfwGetTime(); float dt = (float)(now - last); last = now; cam.update(in, dt);
@@ -137,18 +174,38 @@ int main() {
         if (in.isKeyDown(GLFW_KEY_2) && !k2L) { mode = CULLING_BRUTE_FORCE; std::cout << "Mode: Brute Force Frustum Culling\n"; } k2L=in.isKeyDown(GLFW_KEY_2);
         if (in.isKeyDown(GLFW_KEY_3) && !k3L) { mode = CULLING_OCTREE; std::cout << "Mode: Octree Optimized Culling\n"; } k3L=in.isKeyDown(GLFW_KEY_3);
         if (in.isKeyDown(GLFW_KEY_4) && !k4Last) { drawDbg = !drawDbg; std::cout << "Debug Grid: " << (drawDbg ? "ENABLED" : "DISABLED") << "\n"; } k4Last = in.isKeyDown(GLFW_KEY_4);
+
+        if (in.isKeyDown(GLFW_KEY_P) && !pLast) { enableParticles = !enableParticles; std::cout << "Particles: " << (enableParticles ? "ENABLED" : "DISABLED") << "\n"; } pLast = in.isKeyDown(GLFW_KEY_P);
+
         if (in.isKeyDown(GLFW_KEY_F) && !fLast) { std::cout << "Dropped Flashlight\n"; FallingFlashlight fl{cam.position, cam.front()*12.f, glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f)*3.f}; fl.object.submeshes.push_back(cubeSM); fl.object.unlit = true; fl.object.unlitColor = glm::vec4(fl.color, 1.f); fl.object.localBounds = cubeBounds; fl.object.updateWorldBounds(); dynLights.push_back(fl); }
         fLast = in.isKeyDown(GLFW_KEY_F);
-        std::vector<const SceneObject*> dynPtrs; for (auto& fl : dynLights) { if (fl.position.y > FLOOR) { fl.velocity.y += GRAV * dt; fl.position += fl.velocity * dt; fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f)); fl.object.updateWorldBounds(); } dynPtrs.push_back(&fl.object); }
+
+        std::vector<const SceneObject*> dynPtrs;
+        for (auto& fl : dynLights) {
+            if (fl.position.y > FLOOR) {
+                fl.velocity.y += GRAV * dt; fl.position += fl.velocity * dt;
+                fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));
+                fl.object.updateWorldBounds();
+            }
+            dynPtrs.push_back(&fl.object);
+        }
+
         if (mode == CULLING_OCTREE) dynTree.buildFromPointers(dynPtrs);
-        std::vector<LightData> lights; lights.push_back(Light::makeDirectional({-0.2f,-1,0.1f}, {1,0.9f,0.8f}, 2.f, true, 0));
-        for (const auto& fl : dynLights) lights.push_back(Light::makePoint(fl.position, fl.color, 5.f, 12.f)); rs.setLights(lights);
+        std::vector<LightData> lights;
+
+        lights.push_back(Light::makeDirectional({0.2f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.9f}, 6.0f, true, 0));
+
+        for (const auto& fl : dynLights) lights.push_back(Light::makePoint(fl.position, fl.color, 5.f, 12.f));
+        rs.setLights(lights);
+
         Frustum fr; auto ext = eng.getSwapExtent(); fr.extract(cam.projection((float)ext.width/(float)ext.height) * cam.view());
         std::vector<const SceneObject*> vis; uint32_t qid = fid++;
         if (mode == CULLING_NONE) { for(const auto& o:statObjs) vis.push_back(&o); for(const auto* o:dynPtrs) vis.push_back(o); }
         else if (mode == CULLING_BRUTE_FORCE) { for(const auto& o:statObjs) if(fr.intersects(o.worldBounds)) vis.push_back(&o); for(const auto* o:dynPtrs) if(fr.intersects(o->worldBounds)) vis.push_back(o); }
         else { statTree.query(fr, vis, qid); dynTree.query(fr, vis, qid); }
+
         std::vector<AABB> sBox, dBox; if (drawDbg) { statTree.getActiveNodes(sBox); dynTree.getActiveNodes(dBox); }
-        FrameContext ctx = eng.beginFrame(); if (ctx.valid) { rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, cam, vis, eng, (float)now, cube, sBox, dBox); eng.endFrame(ctx); }
-    } rs.cleanup(eng); eng.cleanup(); glfwDestroyWindow(window); glfwTerminate(); return 0;
+        FrameContext ctx = eng.beginFrame(); if (ctx.valid) { rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, cam, vis, eng, (float)now, cube, sBox, dBox, enableParticles); eng.endFrame(ctx); }
+    }
+    rs.cleanup(eng); eng.cleanup(); glfwDestroyWindow(window); glfwTerminate(); return 0;
 }
