@@ -40,14 +40,15 @@ vec3 toneMapACES(vec3 x) {
 }
 
 void main() {
-    vec4 albedo = texture(gAlbedo, inUV);
-    vec3 normal = texture(gNormal, inUV).xyz;
     float depth = texture(gDepth, inUV).r;
 
     if (depth >= 1.0) {
-        outColor = vec4(albedo.rgb * ubo.ambientColor.rgb, 1.0);
+        outColor = vec4(0.53, 0.75, 0.92, 1.0);
         return;
     }
+
+    vec4 albedo = texture(gAlbedo, inUV);
+    vec3 normal = texture(gNormal, inUV).xyz;
 
     if (length(normal) < 0.001) {
         outColor = vec4(albedo.rgb, 1.0);
@@ -70,9 +71,10 @@ void main() {
         if (type == 0) {
             L = normalize(-light.direction.xyz);
         } else if (type == 1) {
-            L = normalize(light.position.xyz - worldPos);
-            float dist = length(light.position.xyz - worldPos);
-            float range = light.params.w;
+            vec3 toLight = light.position.xyz - worldPos;
+            float dist = length(toLight);
+            float range = max(light.params.w, 0.001);
+            L = toLight / dist;
             atten = clamp(1.0 - (dist * dist) / (range * range), 0.0, 1.0);
         } else if (type == 2) {
             L = normalize(light.position.xyz - worldPos);
@@ -115,8 +117,13 @@ void main() {
             }
         }
 
+        vec3 V = normalize(ubo.viewPos.xyz - worldPos);
+        vec3 H = normalize(L + V);
+        float spec = pow(max(dot(normal, H), 0.0), 32.0);
+        vec3 specular = spec * light.color.rgb * 0.25;
+
         vec3 diffuse = diff * albedo.rgb * light.color.rgb;
-        result += diffuse * atten * shadow * light.color.a;
+        result += (diffuse + specular) * atten * shadow * light.color.a;
     }
 
     outColor = vec4(toneMapACES(result), 1.0);

@@ -102,6 +102,8 @@ private:
     VkPipelineLayout terrainPipelineLayout = VK_NULL_HANDLE;
     VkPipeline terrainPipeline = VK_NULL_HANDLE;
 
+    VkDescriptorSet defaultMatSet = VK_NULL_HANDLE;
+
     void createShadowResources_(Engine& engine);
     void createShadowPipeline_(Engine& engine);
     void createGeomPipeline_(Engine& engine);

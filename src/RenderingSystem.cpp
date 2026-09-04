@@ -25,6 +25,8 @@ struct ParticlePush {
 void RenderingSystem::init(Engine& engine) {
     auto ext = engine.getSwapExtent();
     gbuffer.init(engine, ext.width, ext.height);
+    defaultMatSet = engine.createMaterialSet(engine.createWhiteTexture(), engine.createDefaultNormalTexture(), engine.createBlackTexture());
+
     createInstanceBuffers_(engine);
     createShadowResources_(engine);
     createShadowPipeline_(engine);
@@ -279,8 +281,17 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     for (const auto* obj : objects) {
         for (const auto& sm : obj->submeshes) {
             RenderBatch* target = nullptr;
-            for (auto& b : activeBatches) if (b.mesh.id == sm.mesh.id && b.matSet == sm.matSet && b.isUnlit == obj->unlit && b.isCurtain == sm.isCurtain && b.unlitColor == obj->unlitColor && b.isTransparent == obj->isTransparent) { target = &b; break; }
-            if (!target) { activeBatches.push_back({sm.mesh, sm.matSet, obj->unlit, obj->unlitColor, sm.dispScale, sm.isCurtain, obj->isTransparent, 0, 0, {}}); target = &activeBatches.back(); }
+            VkDescriptorSet effectiveMat = sm.matSet != VK_NULL_HANDLE ? sm.matSet : defaultMatSet;
+            for (auto& b : activeBatches) {
+                if (b.mesh.id == sm.mesh.id && b.matSet == effectiveMat && b.isUnlit == obj->unlit && b.isCurtain == sm.isCurtain && b.unlitColor == obj->unlitColor && b.isTransparent == obj->isTransparent) {
+                    target = &b;
+                    break;
+                }
+            }
+            if (!target) {
+                activeBatches.push_back({sm.mesh, effectiveMat, obj->unlit, obj->unlitColor, sm.dispScale, sm.isCurtain, obj->isTransparent, 0, 0, {}});
+                target = &activeBatches.back();
+            }
             target->instances.push_back({obj->transform, obj->unlit ? obj->unlitColor : glm::vec4(1.0f)});
         }
     }
@@ -288,7 +299,8 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     InstanceData* mapped = (InstanceData*)instanceMapped[frameIndex];
     uint32_t currentOffset = 0;
     for (auto& b : activeBatches) {
-        b.instanceOffset = currentOffset; b.instanceCount = (uint32_t)b.instances.size();
+        b.instanceOffset = currentOffset;
+        b.instanceCount = (uint32_t)b.instances.size();
         memcpy(mapped + currentOffset, b.instances.data(), b.instanceCount * sizeof(InstanceData));
         currentOffset += b.instanceCount;
     }
@@ -312,20 +324,20 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     int bufOut = (particleFrameIndex + 1) % 2;
 
     float dt = time - lastTime;
-    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+    if (dt <= 0.0f) dt = 0.016f;
+    if (dt > 0.05f) dt = 0.05f;
     lastTime = time;
 
     ParticlePush pPush{};
     pPush.dt = dt;
     pPush.time = time;
-    pPush.spawnCount = 20;
-    pPush.maxParticles = 100000;
+    pPush.spawnCount = 10;
+    pPush.maxParticles = 50000;
     pPush.emitterPos = glm::vec4(0.0f, 15.0f, 0.0f, 1.0f);
     pPush.spherePos = glm::vec4(0.0f, 7.0f, 0.0f, 2.0f);
 
     if (enableParticles) {
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
@@ -361,9 +373,8 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
             VkViewport vp{0, 0, 2048, 2048, 0, 1}; vkCmdSetViewport(cmd, 0, 1, &vp);
             VkRect2D sc{{0, 0}, {2048, 2048}}; vkCmdSetScissor(cmd, 0, 1, &sc);
             for (const auto& b : activeBatches) if (!b.isUnlit) {
-                if (b.matSet != VK_NULL_HANDLE) {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 1, 1, &b.matSet, 0, nullptr);
-                }
+                VkDescriptorSet dSet = (b.matSet != VK_NULL_HANDLE) ? b.matSet : defaultMatSet;
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 1, 1, &dSet, 0, nullptr);
                 engine.bindAndDrawInstanced(cmd, b.mesh, instanceBufs[frameIndex], b.instanceOffset, b.instanceCount);
             }
             vkCmdEndRenderPass(cmd);
@@ -371,7 +382,11 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         }
     }
 
-    std::array<VkClearValue, 3> clears{}; clears[2].depthStencil = {1.0f, 0};
+    std::array<VkClearValue, 3> clears{};
+    clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clears[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clears[2].depthStencil = {1.0f, 0};
+
     VkRenderPassBeginInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpi.renderPass = gbuffer.getRenderPass(); rpi.framebuffer = gbuffer.getFramebuffer();
     rpi.renderArea = {{0,0}, ext}; rpi.clearValueCount = 3; rpi.pClearValues = clears.data();
@@ -385,7 +400,8 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     for (const auto& b : activeBatches) {
         GeomPC gpc{b.isUnlit?1:0, b.dispScale, time, b.isCurtain?1:0, b.isTransparent?1:0};
         vkCmdPushConstants(cmd, geomPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(GeomPC), &gpc);
-        if (!b.isUnlit && b.matSet != VK_NULL_HANDLE) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &b.matSet, 0, nullptr);
+        VkDescriptorSet dSet = (b.matSet != VK_NULL_HANDLE) ? b.matSet : defaultMatSet;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &dSet, 0, nullptr);
         engine.bindAndDrawInstanced(cmd, b.mesh, instanceBufs[frameIndex], b.instanceOffset, b.instanceCount);
     }
 
@@ -399,6 +415,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debugPipeline);
         GeomPC gpc{1, 0, time, 0, 0};
         vkCmdPushConstants(cmd, geomPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(GeomPC), &gpc);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geomPipelineLayout, 1, 1, &defaultMatSet, 0, nullptr);
         if (sCnt > 0) engine.bindAndDrawInstanced(cmd, debugCubeMesh, instanceBufs[frameIndex], sOff, sCnt);
         if (dCnt > 0) engine.bindAndDrawInstanced(cmd, debugCubeMesh, instanceBufs[frameIndex], dOff, dCnt);
     }
@@ -428,7 +445,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
 }
 
 void RenderingSystem::createParticleResources_(Engine& engine) {
-    uint32_t maxParticles = 100000;
+    uint32_t maxParticles = 50000;
     VkDeviceSize bufferSize = 16 + maxParticles * 48;
 
     for (int i = 0; i < 2; ++i) {

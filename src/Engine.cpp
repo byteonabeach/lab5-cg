@@ -39,6 +39,7 @@ void Engine::cleanup() {
         vkDestroyBuffer(device, m.vb, nullptr); vkFreeMemory(device, m.vm, nullptr);
         vkDestroyBuffer(device, m.ib, nullptr); vkFreeMemory(device, m.im, nullptr);
     }
+    materialCache.clear();
     vkDestroyDescriptorPool(device, materialPool, nullptr);
     vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
     for (int i = 0; i < MAX_FRAMES; ++i) {
@@ -133,7 +134,6 @@ TextureHandle Engine::loadTexture(const std::string& path) {
     stbi_set_flip_vertically_on_load(false);
     unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!pixels) {
-        std::cerr << "Failed to load texture: " << path << std::endl;
         return createWhiteTexture();
     }
     auto handle = registerTexture_((uint32_t)w, (uint32_t)h, pixels, (VkDeviceSize)w*h*4);
@@ -163,6 +163,16 @@ TextureHandle Engine::createBlackTexture() {
 }
 
 VkDescriptorSet Engine::createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp) {
+    if (!diff.valid()) diff = createWhiteTexture();
+    if (!norm.valid()) norm = createDefaultNormalTexture();
+    if (!disp.valid()) disp = createBlackTexture();
+
+    auto key = std::make_tuple(diff.id, norm.id, disp.id);
+    auto it = materialCache.find(key);
+    if (it != materialCache.end()) {
+        return it->second;
+    }
+
     VkDescriptorSet set;
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = materialPool;
@@ -195,9 +205,9 @@ VkDescriptorSet Engine::createMaterialSet(TextureHandle diff, TextureHandle norm
     writes[2].pImageInfo = &iDisp;
 
     vkUpdateDescriptorSets(device, 3, writes.data(), 0, nullptr);
+    materialCache[key] = set;
     return set;
 }
-
 
 MeshHandle Engine::createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices) {
     MeshRes m;
@@ -445,7 +455,7 @@ VkFormat Engine::findDepthFormat() const {
 std::vector<char> Engine::readFile(const std::string& path) const {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f.is_open()) {
-        throw std::runtime_error("Failed to open file: " + path + " (Make sure you are running the program from the correct working directory!)");
+        throw std::runtime_error("Failed to open file: " + path);
     }
     size_t sz = (size_t)f.tellg();
     f.seekg(0);
@@ -537,6 +547,7 @@ void Engine::transitionLayout(VkImage img, uint32_t layers, VkFormat fmt, VkImag
     } else if (from == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && to == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; src = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dst = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     } else {
+        endSingleTime(cmd);
         return;
     }
     vkCmdPipelineBarrier(cmd, src, dst, 0, 0, nullptr, 0, nullptr, 1, &barrier);

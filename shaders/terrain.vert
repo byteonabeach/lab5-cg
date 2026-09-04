@@ -39,17 +39,18 @@ void main() {
     vec3 worldPos = vec3(worldXZ.x, worldY, worldXZ.y);
     outWorldPos = worldPos;
 
-    vec2 texelSize = 1.0 / vec2(textureSize(heightMap, 0));
-    float hL = textureLod(heightMap, globalUV - vec2(texelSize.x, 0.0), 0.0).r * pc.heightScale;
-    float hR = textureLod(heightMap, globalUV + vec2(texelSize.x, 0.0), 0.0).r * pc.heightScale;
-    float hD = textureLod(heightMap, globalUV - vec2(0.0, texelSize.y), 0.0).r * pc.heightScale;
-    float hU = textureLod(heightMap, globalUV + vec2(0.0, texelSize.y), 0.0).r * pc.heightScale;
+    vec2 uvStep = pc.uvOffsetScale.zw / 32.0;
+    float worldStep = pc.patchOffsetSize.z / 32.0;
 
-    float worldTexelSize = (pc.patchOffsetSize.z / 32.0);
-    vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
+    float hL = textureLod(heightMap, globalUV - vec2(uvStep.x, 0.0), 0.0).r * pc.heightScale;
+    float hR = textureLod(heightMap, globalUV + vec2(uvStep.x, 0.0), 0.0).r * pc.heightScale;
+    float hD = textureLod(heightMap, globalUV - vec2(0.0, uvStep.y), 0.0).r * pc.heightScale;
+    float hU = textureLod(heightMap, globalUV + vec2(0.0, uvStep.y), 0.0).r * pc.heightScale;
+
+    vec3 normal = normalize(vec3(hL - hR, 2.0 * worldStep, hD - hU));
     outNormal = normal;
 
-    vec3 tangent = normalize(vec3(1.0, (hR - hL) / (2.0 * worldTexelSize), 0.0));
+    vec3 tangent = normalize(vec3(1.0, (hR - hL) / (2.0 * worldStep), 0.0));
     outTangent = tangent;
 
     outColor = vec4(1.0);

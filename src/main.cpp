@@ -24,7 +24,7 @@ static std::string findTexture(const std::string& name, const fs::path& baseDir)
     auto fn = fs::path(n).filename(); if (fs::exists(baseDir / fn)) return (baseDir / fn).string(); if (fs::exists(baseDir / "textures" / fn)) return (baseDir / "textures" / fn).string(); return {};
 }
 
-static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
+static std::vector<SceneObject> loadOBJ(Engine& engine, const std::string& objPath) {
     fs::path basePath = fs::path(objPath).parent_path();
     tinyobj::ObjReaderConfig cfg;
     cfg.mtl_search_path = basePath.string();
@@ -48,10 +48,12 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
         return h;
     };
 
-    SceneObject obj;
+    std::vector<SceneObject> result;
+
     for (const auto& shape : shapes) {
         std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches;
         size_t off = 0;
+        AABB shapeBounds;
         for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
             int matID = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[f];
             auto& [verts, inds] = batches[matID];
@@ -59,7 +61,7 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
                 tinyobj::index_t idx = shape.mesh.indices[off + v];
                 Vertex vert{};
                 vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
-                obj.localBounds.expand(vert.pos);
+                shapeBounds.expand(vert.pos);
                 if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
                 if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]};
                 inds.push_back((uint32_t)verts.size());
@@ -67,6 +69,12 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
             }
             off += 3;
         }
+
+        if (batches.empty()) continue;
+
+        SceneObject obj;
+        obj.localBounds = shapeBounds;
+
         for (auto&[matID, pair] : batches) {
             auto& [verts, inds] = pair;
             for (size_t i = 0; i < inds.size(); i += 3) {
@@ -103,8 +111,9 @@ static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
             sm.matSet = engine.createMaterialSet(tDiff, tNorm, tDisp);
             obj.submeshes.push_back(sm);
         }
+        result.push_back(std::move(obj));
     }
-    return obj;
+    return result;
 }
 
 static MeshHandle createCubeMesh(Engine& engine, AABB& out) {
@@ -166,10 +175,12 @@ int main() {
     Terrain terrain;
     terrain.init(eng, "assets/heightmap.png", 600.0f, 45.0f);
 
-    auto sponza = loadOBJ(eng, "assets/sponza.obj");
-    sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
-    sponza.updateWorldBounds();
-    statObjs.push_back(std::move(sponza));
+    auto sponzaObjects = loadOBJ(eng, "assets/sponza.obj");
+    for (auto& sponza : sponzaObjects) {
+        sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
+        sponza.updateWorldBounds();
+        statObjs.push_back(std::move(sponza));
+    }
 
     SubMesh cubeSM{cube, eng.createWhiteTexture(), eng.createDefaultNormalTexture(), eng.createBlackTexture()};
     cubeSM.matSet = eng.createMaterialSet(cubeSM.texture, cubeSM.normalMap, cubeSM.dispMap);

@@ -6,6 +6,8 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <map>
+#include <tuple>
 #include "Culling.h"
 
 struct Vertex {
@@ -229,6 +231,8 @@ private:
     TextureHandle cachedWhiteTex;
     TextureHandle cachedDefNormTex;
     TextureHandle cachedBlackTex;
+
+    std::map<std::tuple<int, int, int>, VkDescriptorSet> materialCache;
 
     VkDescriptorPool materialPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout materialLayout = VK_NULL_HANDLE;
