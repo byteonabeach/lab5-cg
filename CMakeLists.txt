@@ -31,6 +31,7 @@ add_executable(VulkanDeferred
     src/GBuffer.cpp
     src/RenderingSystem.cpp
     src/Octree.cpp
+    src/Terrain.cpp
 )
 
 target_include_directories(VulkanDeferred PRIVATE
@@ -77,6 +78,8 @@ set(SHADERS
     particles.vert
     particles.geom
     particles.frag
+    terrain.vert
+    terrain.frag
 )
 
 foreach(SHADER ${SHADERS})

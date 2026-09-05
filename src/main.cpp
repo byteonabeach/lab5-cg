@@ -5,11 +5,13 @@
 #include "Input.h"
 #include "Culling.h"
 #include "Octree.h"
+#include "Terrain.h"
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 #include <filesystem>
 #include <iostream>
 #include <cmath>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -23,34 +25,86 @@ static std::string findTexture(const std::string& name, const fs::path& baseDir)
 }
 
 static SceneObject loadOBJ(Engine& engine, const std::string& objPath) {
-    fs::path basePath = fs::path(objPath).parent_path(); tinyobj::ObjReaderConfig cfg; cfg.mtl_search_path = basePath.string(); cfg.triangulate = true;
-    tinyobj::ObjReader reader; if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error(reader.Error());
-    const auto& attrib = reader.GetAttrib(); const auto& shapes = reader.GetShapes(); const auto& materials = reader.GetMaterials();
+    fs::path basePath = fs::path(objPath).parent_path();
+    tinyobj::ObjReaderConfig cfg;
+    cfg.mtl_search_path = basePath.string();
+    cfg.triangulate = true;
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile(objPath, cfg)) throw std::runtime_error(reader.Error());
+    const auto& attrib = reader.GetAttrib();
+    const auto& shapes = reader.GetShapes();
+    const auto& materials = reader.GetMaterials();
     TextureHandle white = engine.createWhiteTexture(), defNorm = engine.createDefaultNormalTexture(), black = engine.createBlackTexture();
-    SceneObject obj; for (const auto& shape : shapes) {
-        std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches; size_t off = 0;
+
+    std::unordered_map<std::string, TextureHandle> texCache;
+    auto getCachedTex = [&](const std::string& name) -> TextureHandle {
+        if (name.empty()) return TextureHandle{-1};
+        std::string p = findTexture(name, basePath);
+        if (p.empty()) return TextureHandle{-1};
+        auto it = texCache.find(p);
+        if (it != texCache.end()) return it->second;
+        TextureHandle h = engine.loadTexture(p);
+        texCache[p] = h;
+        return h;
+    };
+
+    SceneObject obj;
+    for (const auto& shape : shapes) {
+        std::unordered_map<int, std::pair<std::vector<Vertex>, std::vector<uint32_t>>> batches;
+        size_t off = 0;
         for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
-            int matID = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[f]; auto& [verts, inds] = batches[matID];
+            int matID = shape.mesh.material_ids.empty() ? -1 : shape.mesh.material_ids[f];
+            auto& [verts, inds] = batches[matID];
             for (int v = 0; v < 3; ++v) {
-                tinyobj::index_t idx = shape.mesh.indices[off + v]; Vertex vert{}; vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
-                obj.localBounds.expand(vert.pos); if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
-                if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]}; inds.push_back((uint32_t)verts.size()); verts.push_back(vert);
-            } off += 3;
+                tinyobj::index_t idx = shape.mesh.indices[off + v];
+                Vertex vert{};
+                vert.pos = {attrib.vertices[3*idx.vertex_index+0], attrib.vertices[3*idx.vertex_index+1], attrib.vertices[3*idx.vertex_index+2]};
+                obj.localBounds.expand(vert.pos);
+                if (idx.normal_index >= 0) vert.normal = {attrib.normals[3*idx.normal_index+0], attrib.normals[3*idx.normal_index+1], attrib.normals[3*idx.normal_index+2]};
+                if (idx.texcoord_index >= 0) vert.texCoord = {attrib.texcoords[2*idx.texcoord_index+0], 1.0f - attrib.texcoords[2*idx.texcoord_index+1]};
+                inds.push_back((uint32_t)verts.size());
+                verts.push_back(vert);
+            }
+            off += 3;
         }
         for (auto&[matID, pair] : batches) {
-            auto& [verts, inds] = pair; for (size_t i = 0; i < inds.size(); i += 3) {
-                Vertex &v0 = verts[inds[i]], &v1 = verts[inds[i+1]], &v2 = verts[inds[i+2]]; glm::vec3 e1 = v1.pos - v0.pos, e2 = v2.pos - v0.pos; glm::vec2 duv1 = v1.texCoord - v0.texCoord, duv2 = v2.texCoord - v0.texCoord;
-                float f = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y + 0.0001f); glm::vec3 t = glm::normalize(f * (duv2.y * e1 - duv1.y * e2)); v0.tangent = v1.tangent = v2.tangent = t;
+            auto& [verts, inds] = pair;
+            for (size_t i = 0; i < inds.size(); i += 3) {
+                Vertex &v0 = verts[inds[i]], &v1 = verts[inds[i+1]], &v2 = verts[inds[i+2]];
+                glm::vec3 e1 = v1.pos - v0.pos, e2 = v2.pos - v0.pos;
+                glm::vec2 duv1 = v1.texCoord - v0.texCoord, duv2 = v2.texCoord - v0.texCoord;
+                float f = 1.0f / (duv1.x * duv2.y - duv2.x * duv1.y + 0.0001f);
+                glm::vec3 t = glm::normalize(f * (duv2.y * e1 - duv1.y * e2));
+                v0.tangent = v1.tangent = v2.tangent = t;
             }
-            SubMesh sm; sm.mesh = engine.createMesh(verts, inds); TextureHandle tDiff = white, tNorm = defNorm, tDisp = black; sm.dispScale = 0; sm.isCurtain = false;
+            SubMesh sm;
+            sm.mesh = engine.createMesh(verts, inds);
+            TextureHandle tDiff = white, tNorm = defNorm, tDisp = black;
+            sm.dispScale = 0;
+            sm.isCurtain = false;
             if (matID >= 0) {
-                auto pDiff = findTexture(materials[matID].diffuse_texname, basePath); auto pNorm = findTexture(materials[matID].bump_texname, basePath); if (pNorm.empty()) pNorm = findTexture(materials[matID].normal_texname, basePath);
-                auto pDisp = findTexture(materials[matID].displacement_texname, basePath); if (!pDiff.empty()) { tDiff = engine.loadTexture(pDiff); if (pDiff.find("curtain") != std::string::npos) sm.isCurtain = true; }
-                if (!pNorm.empty()) tNorm = engine.loadTexture(pNorm); if (!pDisp.empty()) { tDisp = engine.loadTexture(pDisp); sm.dispScale = 0.05f; }
+                auto hDiff = getCachedTex(materials[matID].diffuse_texname);
+                if (hDiff.valid()) {
+                    tDiff = hDiff;
+                    if (materials[matID].diffuse_texname.find("curtain") != std::string::npos) sm.isCurtain = true;
+                }
+                auto hNorm = getCachedTex(materials[matID].bump_texname);
+                if (!hNorm.valid()) hNorm = getCachedTex(materials[matID].normal_texname);
+                if (hNorm.valid()) tNorm = hNorm;
+                auto hDisp = getCachedTex(materials[matID].displacement_texname);
+                if (hDisp.valid()) {
+                    tDisp = hDisp;
+                    sm.dispScale = 0.05f;
+                }
             }
-            sm.texture = tDiff; sm.normalMap = tNorm; sm.dispMap = tDisp; sm.matSet = engine.createMaterialSet(tDiff, tNorm, tDisp); obj.submeshes.push_back(sm);
+            sm.texture = tDiff;
+            sm.normalMap = tNorm;
+            sm.dispMap = tDisp;
+            sm.matSet = engine.createMaterialSet(tDiff, tNorm, tDisp);
+            obj.submeshes.push_back(sm);
         }
-    } return obj;
+    }
+    return obj;
 }
 
 static MeshHandle createCubeMesh(Engine& engine, AABB& out) {
@@ -104,10 +158,13 @@ static MeshHandle createSphereMesh(Engine& engine, AABB& out, int sectors, int s
 
 int main() {
     const float GRAV = -9.81f, FLOOR = 0.05f; glfwInit(); glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Octree Debugger", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Vulkan Octree & Terrain Debugger", nullptr, nullptr);
     Input in; in.init(window); Engine eng; RenderingSystem rs; eng.init(window); rs.init(eng);
     AABB cubeBounds; MeshHandle cube = createCubeMesh(eng, cubeBounds);
     std::vector<SceneObject> statObjs; std::vector<FallingFlashlight> dynLights;
+
+    Terrain terrain;
+    terrain.init(eng, "assets/heightmap.png", 600.0f, 45.0f);
 
     auto sponza = loadOBJ(eng, "assets/sponza.obj");
     sponza.transform = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f));
@@ -145,23 +202,8 @@ int main() {
     fenceObj.updateWorldBounds();
     statObjs.push_back(fenceObj);
 
-    for (int i = 0; i < 5000; ++i) {
-        SceneObject c;
-        c.submeshes.push_back(cubeSM);
-        c.localBounds = cubeBounds;
-        float rx = ((rand() % 2000) / 10.f) - 100.f;
-        float rz = ((rand() % 2000) / 10.f) - 100.f;
-        if (rx > -25.f && rx < 25.f && rz > -25.f && rz < 25.f) {
-            rx += (rx > 0.f ? 30.f : -30.f);
-            rz += (rz > 0.f ? 30.f : -30.f);
-        }
-        c.transform = glm::translate(glm::mat4(1.0f), glm::vec3(rx, (rand() % 150) / 10.f, rz)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
-        c.updateWorldBounds();
-        statObjs.push_back(c);
-    }
-
     Octree statTree; statTree.build(statObjs); Octree dynTree;
-    Camera cam; cam.position = {0.0f, 45.0f, 15.0f}; cam.pitch = -45.0f; double last = glfwGetTime(); uint32_t fid = 1;
+    Camera cam; cam.position = {0.0f, 40.0f, 80.0f}; cam.pitch = -25.0f; double last = glfwGetTime(); uint32_t fid = 1;
     bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false, pLast = false;
     bool enableParticles = true;
     CullingMode mode = CULLING_OCTREE;
@@ -193,19 +235,22 @@ int main() {
         if (mode == CULLING_OCTREE) dynTree.buildFromPointers(dynPtrs);
         std::vector<LightData> lights;
 
-        lights.push_back(Light::makeDirectional({0.2f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.9f}, 6.0f, true, 0));
+        lights.push_back(Light::makeDirectional({0.2f, -1.0f, -0.3f}, {1.0f, 0.95f, 0.9f}, 1.2f, true, 0));
 
         for (const auto& fl : dynLights) lights.push_back(Light::makePoint(fl.position, fl.color, 5.f, 12.f));
         rs.setLights(lights);
 
         Frustum fr; auto ext = eng.getSwapExtent(); fr.extract(cam.projection((float)ext.width/(float)ext.height) * cam.view());
+
+        terrain.update(cam, fr);
+
         std::vector<const SceneObject*> vis; uint32_t qid = fid++;
         if (mode == CULLING_NONE) { for(const auto& o:statObjs) vis.push_back(&o); for(const auto* o:dynPtrs) vis.push_back(o); }
         else if (mode == CULLING_BRUTE_FORCE) { for(const auto& o:statObjs) if(fr.intersects(o.worldBounds)) vis.push_back(&o); for(const auto* o:dynPtrs) if(fr.intersects(o->worldBounds)) vis.push_back(o); }
         else { statTree.query(fr, vis, qid); dynTree.query(fr, vis, qid); }
 
         std::vector<AABB> sBox, dBox; if (drawDbg) { statTree.getActiveNodes(sBox); dynTree.getActiveNodes(dBox); }
-        FrameContext ctx = eng.beginFrame(); if (ctx.valid) { rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, cam, vis, eng, (float)now, cube, sBox, dBox, enableParticles); eng.endFrame(ctx); }
+        FrameContext ctx = eng.beginFrame(); if (ctx.valid) { rs.recordFrame(ctx.cmd, ctx.imageIndex, ctx.frameIndex, cam, vis, eng, (float)now, cube, sBox, dBox, enableParticles, &terrain); eng.endFrame(ctx); }
     }
-    rs.cleanup(eng); eng.cleanup(); glfwDestroyWindow(window); glfwTerminate(); return 0;
+    terrain.cleanup(eng.getDevice()); rs.cleanup(eng); eng.cleanup(); glfwDestroyWindow(window); glfwTerminate(); return 0;
 }

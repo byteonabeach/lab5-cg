@@ -3,6 +3,7 @@
 #include "GBuffer.h"
 #include "Light.h"
 #include "Camera.h"
+#include "Terrain.h"
 #include <vector>
 
 struct RenderBatch {
@@ -24,7 +25,8 @@ public:
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
-    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {}, bool enableParticles = true);
+    void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {}, bool enableParticles = true, const Terrain* terrain = nullptr);
+
 private:
     GBuffer gbuffer;
     struct GeomUBO { glm::mat4 view, proj; glm::vec4 cameraPos; };
@@ -96,6 +98,10 @@ private:
     int particleFrameIndex = 0;
     float lastTime = 0.0f;
 
+    VkDescriptorSetLayout terrainMaterialLayout = VK_NULL_HANDLE;
+    VkPipelineLayout terrainPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline terrainPipeline = VK_NULL_HANDLE;
+
     void createShadowResources_(Engine& engine);
     void createShadowPipeline_(Engine& engine);
     void createGeomPipeline_(Engine& engine);
@@ -109,6 +115,8 @@ private:
 
     void createParticleResources_(Engine& engine);
     void createParticlePipelines_(Engine& engine);
+
+    void createTerrainPipeline_(Engine& engine);
 
     VkPipelineShaderStageCreateInfo loadShader_(Engine& engine, const std::string& path, VkShaderStageFlagBits stage);
 };

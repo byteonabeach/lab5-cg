@@ -38,6 +38,7 @@ void RenderingSystem::init(Engine& engine) {
 
     createParticleResources_(engine);
     createParticlePipelines_(engine);
+    createTerrainPipeline_(engine);
 }
 
 void RenderingSystem::cleanup(Engine& engine) {
@@ -60,6 +61,10 @@ void RenderingSystem::cleanup(Engine& engine) {
     vkDestroyDescriptorPool(dev, shadowDescPool, nullptr);
     vkDestroyRenderPass(dev, shadowRenderPass, nullptr);
     vkDestroySampler(dev, shadowSampler, nullptr);
+
+    vkDestroyPipeline(dev, terrainPipeline, nullptr);
+    vkDestroyPipelineLayout(dev, terrainPipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(dev, terrainMaterialLayout, nullptr);
 
     vkDestroyPipeline(dev, particleComputePipeline, nullptr);
     vkDestroyPipeline(dev, particleResetPipeline, nullptr);
@@ -106,11 +111,92 @@ void RenderingSystem::createInstanceBuffers_(Engine& engine) {
     }
 }
 
-void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh, const std::vector<AABB>& staticNodes, const std::vector<AABB>& dynamicNodes, bool enableParticles) {
+void RenderingSystem::createTerrainPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+
+    VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lci.bindingCount = 1;
+    lci.pBindings = &b;
+    vkCreateDescriptorSetLayout(dev, &lci, nullptr, &terrainMaterialLayout);
+
+    VkPushConstantRange pcr{VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(TerrainPatchPush)};
+    VkDescriptorSetLayout layouts[] = {geomUBOLayout, terrainMaterialLayout};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 2;
+    plci.pSetLayouts = layouts;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
+    vkCreatePipelineLayout(dev, &plci, nullptr, &terrainPipelineLayout);
+
+    auto vs = loadShader_(engine, "shaders/terrain.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto fs = loadShader_(engine, "shaders/terrain.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkPipelineShaderStageCreateInfo stages[] = {vs, fs};
+
+    auto bd = Vertex::getBindingDesc();
+    auto ad = Vertex::getAttrDescs();
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &bd;
+    vi.vertexAttributeDescriptionCount = (uint32_t)ad.size();
+    vi.pVertexAttributeDescriptions = ad.data();
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = 1;
+    ds.depthWriteEnable = 1;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    std::array<VkPipelineColorBlendAttachmentState, 2> cba{};
+    for (auto& a : cba) a.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 2;
+    cb.pAttachments = cba.data();
+
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dy.dynamicStateCount = 2;
+    dy.pDynamicStates = dyn;
+
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 2;
+    gci.pStages = stages;
+    gci.pVertexInputState = &vi;
+    gci.pInputAssemblyState = &ia;
+    gci.pViewportState = &vp;
+    gci.pRasterizationState = &rs;
+    gci.pMultisampleState = &ms;
+    gci.pDepthStencilState = &ds;
+    gci.pColorBlendState = &cb;
+    gci.pDynamicState = &dy;
+    gci.layout = terrainPipelineLayout;
+    gci.renderPass = gbuffer.getRenderPass();
+
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &terrainPipeline);
+    vkDestroyShaderModule(dev, vs.module, nullptr);
+    vkDestroyShaderModule(dev, fs.module, nullptr);
+}
+
+void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh, const std::vector<AABB>& staticNodes, const std::vector<AABB>& dynamicNodes, bool enableParticles, const Terrain* terrain) {
     auto ext = engine.getSwapExtent();
     GeomUBO gubo{ camera.view(), camera.projection((float)ext.width/(float)ext.height), glm::vec4(camera.position, 1.0f) };
     memcpy(geomUBOMapped[frameIndex], &gubo, sizeof(GeomUBO));
-    LightsUBO lubo{ glm::vec4(camera.position, 1.0f), glm::vec4(0.08f, 0.08f, 0.10f, 1.0f), { (int)std::min((size_t)MAX_LIGHTS, pendingLights.size()), 0,0,0 }, glm::inverse(gubo.proj * gubo.view) };
+    LightsUBO lubo{ glm::vec4(camera.position, 1.0f), glm::vec4(0.08f, 0.08f, 0.10f, 1.0f), { (int)std::min((size_t)MAX_LIGHTS, pendingLights.size()), 0,0,0 }, glm::inverse(gubo.proj * gubo.view), camera.view() };
 
     for (int i = 0; i < lubo.countPad.x; ++i) {
         lubo.lights[i] = pendingLights[i];
@@ -170,6 +256,15 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
                 glm::mat4 lightOrthoMatrix = glm::ortho(-radius, radius, -radius, radius, 0.0f, radius * (1.0f + zMultiplier));
                 lightOrthoMatrix[1][1] *= -1.0f;
 
+                glm::mat4 shadowMatrix = lightOrthoMatrix * lightViewMatrix;
+                glm::vec4 shadowOrigin = shadowMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                shadowOrigin *= (2048.0f / 2.0f);
+                glm::vec4 roundedOrigin = glm::round(shadowOrigin);
+                glm::vec4 roundOffset = (roundedOrigin - shadowOrigin) * (2.0f / 2048.0f);
+                roundOffset.z = 0.0f;
+                roundOffset.w = 0.0f;
+                lightOrthoMatrix[3] += roundOffset;
+
                 lubo.lights[i].cascadeMatrices[c] = lightOrthoMatrix * lightViewMatrix;
                 lubo.lights[i].cascadeSplits[c] = splitDist;
                 ((glm::mat4*)shadowUBOMapped[frameIndex])[c] = lubo.lights[i].cascadeMatrices[c];
@@ -217,13 +312,13 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     int bufOut = (particleFrameIndex + 1) % 2;
 
     float dt = time - lastTime;
-    if (dt <= 0.0f) dt = 0.016f;
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
     lastTime = time;
 
     ParticlePush pPush{};
     pPush.dt = dt;
     pPush.time = time;
-    pPush.spawnCount = 150;
+    pPush.spawnCount = 20;
     pPush.maxParticles = 100000;
     pPush.emitterPos = glm::vec4(0.0f, 15.0f, 0.0f, 1.0f);
     pPush.spherePos = glm::vec4(0.0f, 7.0f, 0.0f, 2.0f);
@@ -241,7 +336,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         vkCmdDispatch(cmd, 1, 1, 1);
 
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputePipeline);
@@ -294,6 +389,12 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
         engine.bindAndDrawInstanced(cmd, b.mesh, instanceBufs[frameIndex], b.instanceOffset, b.instanceCount);
     }
 
+    if (terrain && terrain->isInitialized()) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrainPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, terrainPipelineLayout, 0, 1, &geomDescSets[frameIndex], 0, nullptr);
+        terrain->draw(cmd, terrainPipelineLayout, engine);
+    }
+
     if (debugCubeMesh.valid() && (sCnt > 0 || dCnt > 0)) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debugPipeline);
         GeomPC gpc{1, 0, time, 0, 0};
@@ -311,7 +412,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
 
     vkCmdEndRenderPass(cmd);
 
-    VkClearValue lc; lc.color = {{0.02f, 0.02f, 0.05f, 1.0f}};
+    VkClearValue lc; lc.color = {{0.53f, 0.75f, 0.92f, 1.0f}};
     VkRenderPassBeginInfo lrpi{}; lrpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     lrpi.renderPass = lightRenderPass; lrpi.framebuffer = lightFramebuffers[imageIndex];
     lrpi.renderArea = {{0,0}, ext}; lrpi.clearValueCount = 1; lrpi.pClearValues = &lc;
@@ -321,7 +422,9 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
 
-    particleFrameIndex++;
+    if (enableParticles) {
+        particleFrameIndex++;
+    }
 }
 
 void RenderingSystem::createParticleResources_(Engine& engine) {
@@ -454,9 +557,10 @@ void RenderingSystem::createShadowResources_(Engine& engine) {
     si.magFilter = VK_FILTER_LINEAR;
     si.minFilter = VK_FILTER_LINEAR;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
     vkCreateSampler(engine.getDevice(), &si, nullptr, &shadowSampler);
 
     VkAttachmentDescription att{};

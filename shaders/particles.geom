@@ -20,6 +20,9 @@ layout(location = 4) out vec4 outColor;
 
 void main() {
     vec3 pos = gl_in[0].gl_Position.xyz;
+    vec4 viewPos = ubo.view * vec4(pos, 1.0);
+    if (viewPos.z > -0.25) return;
+
     vec4 color = inColor[0];
     float life = inLife[0];
     float maxLife = inMaxLife[0];
@@ -28,15 +31,15 @@ void main() {
 
     vec3 right = vec3(ubo.view[0][0], ubo.view[1][0], ubo.view[2][0]);
     vec3 up = vec3(ubo.view[0][1], ubo.view[1][1], ubo.view[2][1]);
-    
-    vec3 normal = normalize(ubo.cameraPos.xyz - pos);
+
+    vec3 normal = normalize(cross(right, up));
     vec3 tangent = right;
 
     vec2 uvs[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 offsets[4] = vec2[](vec2(-0.5,-0.5), vec2(0.5,-0.5), vec2(-0.5,0.5), vec2(0.5,0.5));
 
     for (int i = 0; i < 4; ++i) {
-        vec3 worldPos = pos + right * offsets[i].x * size + up * offsets[i].y * size;
+        vec3 worldPos = pos + right * (offsets[i].x * size) + up * (offsets[i].y * size);
         gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
         outWorldPos = worldPos;
         outNormal = normal;

@@ -62,5 +62,6 @@ struct LightsUBO {
     glm::vec4 ambientColor;
     glm::ivec4 countPad;
     glm::mat4 invViewProj;
+    glm::mat4 view;
     LightData lights[MAX_LIGHTS];
 };

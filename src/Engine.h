@@ -113,9 +113,17 @@ public:
     void recreateSwapchain();
 
     TextureHandle loadTexture(const std::string& path);
+    TextureHandle registerRawTexture(uint32_t w, uint32_t h, const unsigned char* pixels, VkDeviceSize size) {
+        return registerTexture_(w, h, pixels, size);
+    }
     TextureHandle createWhiteTexture();
     TextureHandle createDefaultNormalTexture();
     TextureHandle createBlackTexture();
+
+    VkDescriptorImageInfo getTextureDescriptorInfo(TextureHandle h) const {
+        const auto& t = textures[h.id];
+        return {t.sampler, t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
 
     VkDescriptorSet createMaterialSet(TextureHandle diff, TextureHandle norm, TextureHandle disp);
     MeshHandle createMesh(const std::vector<Vertex>& verts, const std::vector<uint32_t>& indices);
@@ -132,6 +140,14 @@ public:
     size_t getSwapImageCount() const { return swapImages.size(); }
 
     VkDescriptorSetLayout getMaterialLayout() const { return materialLayout; }
+
+    void bindMeshOnly(VkCommandBuffer cmd, MeshHandle h) const {
+        if (!h.valid()) return;
+        const auto& m = meshes[h.id];
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vb, &offset);
+        vkCmdBindIndexBuffer(cmd, m.ib, 0, VK_INDEX_TYPE_UINT32);
+    }
 
     void bindAndDrawMesh_(VkCommandBuffer cmd, MeshHandle h) const {
         if (!h.valid()) return;
