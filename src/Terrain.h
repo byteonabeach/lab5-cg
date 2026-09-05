@@ -62,6 +62,7 @@ private:
     bool initialized = false;
     float totalWorldSize = 600.0f;
     float maxHeightScale = 45.0f;
+    uint32_t patchIndexCount = 0;
     TextureHandle heightmapTexture;
     MeshHandle patchMeshHandle;
     VkDescriptorSet terrainDescriptorSet = VK_NULL_HANDLE;

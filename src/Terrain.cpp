@@ -21,7 +21,7 @@ void Terrain::init(Engine& engine, const std::string& heightmapPath, float world
         glm::vec2(0.0f, 0.0f),
         glm::vec2(1.0f, 1.0f),
         0,
-        -5.0f,
+        -15.0f,
         maxHeightScale + 5.0f
     );
 
@@ -53,7 +53,7 @@ void Terrain::traverseNode_(TerrainNode* node, const glm::vec3& camPos, const Fr
 
     if (dist < lodThreshold && node->depth < MAX_LOD) {
         if (node->isLeaf) {
-            node->subdivide(-5.0f, maxHeightScale + 5.0f);
+            node->subdivide(-15.0f, maxHeightScale + 5.0f);
         }
         for (int i = 0; i < 4; ++i) {
             traverseNode_(node->children[i].get(), camPos, frustum);
@@ -76,19 +76,21 @@ void Terrain::draw(VkCommandBuffer cmd, VkPipelineLayout layout, const Engine& e
 
     for (const auto& patch : activePatches) {
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(TerrainPatchPush), &patch);
-        vkCmdDrawIndexed(cmd, GRID_RESOLUTION * GRID_RESOLUTION * 6, 1, 0, 0, 0);
+        vkCmdDrawIndexed(cmd, patchIndexCount, 1, 0, 0, 0);
     }
 }
 
 void Terrain::createPatchMesh_(Engine& engine) {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
+    const uint32_t N = GRID_RESOLUTION;
+    const uint32_t stride = N + 1;
 
-    for (int z = 0; z <= GRID_RESOLUTION; ++z) {
-        for (int x = 0; x <= GRID_RESOLUTION; ++x) {
+    for (uint32_t z = 0; z <= N; ++z) {
+        for (uint32_t x = 0; x <= N; ++x) {
             Vertex v{};
-            float u = (float)x / (float)GRID_RESOLUTION;
-            float w = (float)z / (float)GRID_RESOLUTION;
+            float u = (float)x / (float)N;
+            float w = (float)z / (float)N;
             v.pos = glm::vec3(u, 0.0f, w);
             v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
             v.texCoord = glm::vec2(u, w);
@@ -97,10 +99,10 @@ void Terrain::createPatchMesh_(Engine& engine) {
         }
     }
 
-    for (int z = 0; z < GRID_RESOLUTION; ++z) {
-        for (int x = 0; x < GRID_RESOLUTION; ++x) {
-            uint32_t row1 = z * (GRID_RESOLUTION + 1);
-            uint32_t row2 = (z + 1) * (GRID_RESOLUTION + 1);
+    for (uint32_t z = 0; z < N; ++z) {
+        for (uint32_t x = 0; x < N; ++x) {
+            uint32_t row1 = z * stride;
+            uint32_t row2 = (z + 1) * stride;
 
             indices.push_back(row1 + x);
             indices.push_back(row2 + x);
@@ -112,6 +114,83 @@ void Terrain::createPatchMesh_(Engine& engine) {
         }
     }
 
+    uint32_t bNorth = (uint32_t)vertices.size();
+    for (uint32_t x = 0; x <= N; ++x) {
+        Vertex v{};
+        float u = (float)x / (float)N;
+        v.pos = glm::vec3(u, -1.0f, 0.0f);
+        v.normal = glm::vec3(0.0f, 0.0f, -1.0f);
+        v.texCoord = glm::vec2(u, 0.0f);
+        v.tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+        vertices.push_back(v);
+    }
+
+    for (uint32_t x = 0; x < N; ++x) {
+        uint32_t s0 = x;
+        uint32_t s1 = x + 1;
+        uint32_t b0 = bNorth + x;
+        uint32_t b1 = bNorth + x + 1;
+        indices.insert(indices.end(), {s0, b0, s1, s1, b0, b1});
+    }
+
+    uint32_t bSouth = (uint32_t)vertices.size();
+    for (uint32_t x = 0; x <= N; ++x) {
+        Vertex v{};
+        float u = (float)x / (float)N;
+        v.pos = glm::vec3(u, -1.0f, 1.0f);
+        v.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+        v.texCoord = glm::vec2(u, 1.0f);
+        v.tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+        vertices.push_back(v);
+    }
+
+    for (uint32_t x = 0; x < N; ++x) {
+        uint32_t s0 = N * stride + x;
+        uint32_t s1 = N * stride + x + 1;
+        uint32_t b0 = bSouth + x;
+        uint32_t b1 = bSouth + x + 1;
+        indices.insert(indices.end(), {s0, s1, b0, s1, b1, b0});
+    }
+
+    uint32_t bWest = (uint32_t)vertices.size();
+    for (uint32_t z = 0; z <= N; ++z) {
+        Vertex v{};
+        float w = (float)z / (float)N;
+        v.pos = glm::vec3(0.0f, -1.0f, w);
+        v.normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+        v.texCoord = glm::vec2(0.0f, w);
+        v.tangent = glm::vec3(0.0f, 0.0f, 1.0f);
+        vertices.push_back(v);
+    }
+
+    for (uint32_t z = 0; z < N; ++z) {
+        uint32_t s0 = z * stride;
+        uint32_t s1 = (z + 1) * stride;
+        uint32_t b0 = bWest + z;
+        uint32_t b1 = bWest + z + 1;
+        indices.insert(indices.end(), {s0, s1, b0, s1, b1, b0});
+    }
+
+    uint32_t bEast = (uint32_t)vertices.size();
+    for (uint32_t z = 0; z <= N; ++z) {
+        Vertex v{};
+        float w = (float)z / (float)N;
+        v.pos = glm::vec3(1.0f, -1.0f, w);
+        v.normal = glm::vec3(1.0f, 0.0f, 0.0f);
+        v.texCoord = glm::vec2(1.0f, w);
+        v.tangent = glm::vec3(0.0f, 0.0f, 1.0f);
+        vertices.push_back(v);
+    }
+
+    for (uint32_t z = 0; z < N; ++z) {
+        uint32_t s0 = z * stride + N;
+        uint32_t s1 = (z + 1) * stride + N;
+        uint32_t b0 = bEast + z;
+        uint32_t b1 = bEast + z + 1;
+        indices.insert(indices.end(), {s0, b0, s1, s1, b0, b1});
+    }
+
+    patchIndexCount = (uint32_t)indices.size();
     patchMeshHandle = engine.createMesh(vertices, indices);
 }
 

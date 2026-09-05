@@ -35,6 +35,11 @@ void main() {
     float h = textureLod(heightMap, globalUV, 0.0).r;
     float worldY = h * pc.heightScale;
 
+    if (inPos.y < -0.5) {
+        float skirtDepth = 3.5 + pc.patchOffsetSize.z * 0.06;
+        worldY -= skirtDepth;
+    }
+
     vec2 worldXZ = pc.patchOffsetSize.xy + localUV * pc.patchOffsetSize.z;
     vec3 worldPos = vec3(worldXZ.x, worldY, worldXZ.y);
     outWorldPos = worldPos;
