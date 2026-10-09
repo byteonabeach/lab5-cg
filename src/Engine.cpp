@@ -44,9 +44,9 @@ void Engine::cleanup() {
     vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
     for (int i = 0; i < MAX_FRAMES; ++i) {
         vkDestroySemaphore(device, imageAvailable[i], nullptr);
-        vkDestroySemaphore(device, renderFinished[i], nullptr);
         vkDestroyFence(device, inFlightFences[i], nullptr);
     }
+    for (auto s : renderFinished) vkDestroySemaphore(device, s, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     cleanupSwapchain_();
     vkDestroyDevice(device, nullptr);
@@ -59,6 +59,7 @@ FrameContext Engine::beginFrame() {
     uint32_t imageIndex;
     VkResult res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailable[currentFrame], VK_NULL_HANDLE, &imageIndex);
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreateSwapchain();
         return {VK_NULL_HANDLE, 0, currentFrame, false};
     }
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) throw std::runtime_error("vkAcquireNextImageKHR failed");
@@ -83,17 +84,18 @@ void Engine::endFrame(const FrameContext& ctx) {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &ctx.cmd;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &renderFinished[ctx.frameIndex];
+    si.pSignalSemaphores = &renderFinished[ctx.imageIndex];
     vkResetFences(device, 1, &inFlightFences[ctx.frameIndex]);
     vkQueueSubmit(graphicsQueue, 1, &si, inFlightFences[ctx.frameIndex]);
     VkPresentInfoKHR pi{};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &renderFinished[ctx.frameIndex];
+    pi.pWaitSemaphores = &renderFinished[ctx.imageIndex];
     pi.swapchainCount = 1;
     pi.pSwapchains = &swapchain;
     pi.pImageIndices = &ctx.imageIndex;
-    vkQueuePresentKHR(presentQueue, &pi);
+    VkResult pres = vkQueuePresentKHR(presentQueue, &pi);
+    if (pres == VK_ERROR_OUT_OF_DATE_KHR) recreateSwapchain();
     currentFrame = (currentFrame + 1) % MAX_FRAMES;
 }
 
@@ -118,9 +120,7 @@ TextureHandle Engine::registerTexture_(uint32_t w, uint32_t h, const unsigned ch
     si.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     si.anisotropyEnable = VK_TRUE;
-    VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(physDevice, &props);
-    si.maxAnisotropy = props.limits.maxSamplerAnisotropy;
+    si.maxAnisotropy = maxAnisotropy;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     vkCreateSampler(device, &si, nullptr, &t.sampler);
 
@@ -257,6 +257,10 @@ void Engine::pickPhysDevice_() {
         vkGetPhysicalDeviceProperties(d, &p);
         if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { physDevice = d; break; }
     }
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physDevice, &props);
+    maxAnisotropy = props.limits.maxSamplerAnisotropy;
+    vkGetPhysicalDeviceMemoryProperties(physDevice, &memProps);
 }
 
 void Engine::createDevice_() {
@@ -373,7 +377,6 @@ void Engine::createCommandBuffers_() {
 
 void Engine::createSyncObjects_() {
     imageAvailable.resize(MAX_FRAMES);
-    renderFinished.resize(MAX_FRAMES);
     inFlightFences.resize(MAX_FRAMES);
     imagesInFlight.resize(swapImages.size(), VK_NULL_HANDLE);
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -381,9 +384,15 @@ void Engine::createSyncObjects_() {
     fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     for (int i = 0; i < MAX_FRAMES; ++i) {
         vkCreateSemaphore(device, &si, nullptr, &imageAvailable[i]);
-        vkCreateSemaphore(device, &si, nullptr, &renderFinished[i]);
         vkCreateFence(device, &fi, nullptr, &inFlightFences[i]);
     }
+    createRenderFinishedSemaphores_();
+}
+
+void Engine::createRenderFinishedSemaphores_() {
+    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    renderFinished.resize(swapImages.size());
+    for (auto& s : renderFinished) vkCreateSemaphore(device, &si, nullptr, &s);
 }
 
 void Engine::createMaterialLayout_() {
@@ -430,16 +439,18 @@ void Engine::recreateSwapchain() {
         glfwWaitEvents();
     }
     vkDeviceWaitIdle(device);
+    for (auto s : renderFinished) vkDestroySemaphore(device, s, nullptr);
+    renderFinished.clear();
     cleanupSwapchain_();
     createSwapchain_();
     imagesInFlight.assign(swapImages.size(), VK_NULL_HANDLE);
+    createRenderFinishedSemaphores_();
+    swapchainRecreated = true;
 }
 
 uint32_t Engine::findMemoryType(uint32_t filter, VkMemoryPropertyFlags flags) const {
-    VkPhysicalDeviceMemoryProperties mp;
-    vkGetPhysicalDeviceMemoryProperties(physDevice, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
-        if ((filter & (1 << i)) && (mp.memoryTypes[i].propertyFlags & flags) == flags) return i;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+        if ((filter & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & flags) == flags) return i;
     return 0;
 }
 

@@ -4,7 +4,7 @@ struct Particle {
     vec3 pos; float life; vec3 vel; float maxLife; vec4 color;
 };
 
-layout(set = 1, binding = 0) buffer OutBuf {
+layout(set = 1, binding = 0) readonly buffer OutBuf {
     uint outVertexCount; uint outInstanceCount; uint outFirstVertex; uint outFirstInstance;
     Particle particles[];
 };
@@ -12,6 +12,7 @@ layout(set = 1, binding = 0) buffer OutBuf {
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out float outLife;
 layout(location = 2) out float outMaxLife;
+layout(location = 3) out vec3 outVel;
 
 void main() {
     Particle p = particles[gl_VertexIndex];
@@ -19,4 +20,5 @@ void main() {
     outColor = p.color;
     outLife = p.life;
     outMaxLife = p.maxLife;
+    outVel = p.vel;
 }

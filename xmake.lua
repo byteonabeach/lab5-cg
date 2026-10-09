@@ -29,7 +29,10 @@ before_build(function(target)
         "shadows.vert", "shadows.geom", "shadows.frag",
         "particles.comp", "particles_reset.comp",
         "particles.vert", "particles.geom", "particles.frag",
-        "terrain.vert", "terrain.frag"
+        "terrain.vert", "terrain.frag",
+        "mc_field.comp", "mc_polygonize.comp",
+        "marching.vert", "marching.frag", "marching_shadow.vert",
+        "taa.frag"
     }
     for _, s in ipairs(shaders) do
         local src = path.join("shaders", s)

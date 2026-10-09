@@ -27,7 +27,7 @@ void GBuffer::recreate(Engine& engine, uint32_t width, uint32_t height) {
 }
 
 void GBuffer::createAttachments_(Engine& engine) {
-    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO };
+    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO, FORMAT_VELOCITY };
     for (int i = 0; i < NUM_ATTACHMENTS; ++i) {
         engine.createImage(extent.width, extent.height, 1, fmts[i], VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, images[i], memories[i]);
         views[i] = engine.createImageView(images[i], fmts[i], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
@@ -52,10 +52,11 @@ void GBuffer::createSampler_(VkDevice device) {
 
 void GBuffer::createRenderPass_(Engine& engine) {
     if (renderPass != VK_NULL_HANDLE) return;
-    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO };
+    constexpr VkFormat fmts[NUM_ATTACHMENTS] = { FORMAT_NORMAL, FORMAT_ALBEDO, FORMAT_VELOCITY };
+    constexpr uint32_t depthIndex = NUM_ATTACHMENTS;
     VkFormat depthFmt = engine.findDepthFormat();
 
-    std::array<VkAttachmentDescription, 3> atts{};
+    std::array<VkAttachmentDescription, NUM_ATTACHMENTS + 1> atts{};
 
     for (int i = 0; i < NUM_ATTACHMENTS; ++i) {
         atts[i].format = fmts[i];
@@ -68,18 +69,18 @@ void GBuffer::createRenderPass_(Engine& engine) {
         atts[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
-    atts[2].format = depthFmt;
-    atts[2].samples = VK_SAMPLE_COUNT_1_BIT;
-    atts[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    atts[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    atts[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    atts[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    atts[depthIndex].format = depthFmt;
+    atts[depthIndex].samples = VK_SAMPLE_COUNT_1_BIT;
+    atts[depthIndex].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    atts[depthIndex].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    atts[depthIndex].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[depthIndex].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[depthIndex].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    atts[depthIndex].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     std::array<VkAttachmentReference, NUM_ATTACHMENTS> colorRefs{};
     for (int i = 0; i < NUM_ATTACHMENTS; ++i) colorRefs[i] = {(uint32_t)i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{depthIndex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -115,7 +116,7 @@ void GBuffer::createRenderPass_(Engine& engine) {
 }
 
 void GBuffer::createFramebuffer_(Engine& engine) {
-    std::array<VkImageView, 3> attachments = {views[0], views[1], depthView};
+    std::array<VkImageView, NUM_ATTACHMENTS + 1> attachments = {views[0], views[1], views[2], depthView};
     VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fci.renderPass = renderPass;
     fci.attachmentCount = (uint32_t)attachments.size();

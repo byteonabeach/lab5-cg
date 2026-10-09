@@ -215,13 +215,14 @@ int main() {
 
     Octree statTree; statTree.build(statObjs); Octree dynTree;
     Camera cam; cam.position = {0.0f, 40.0f, 80.0f}; cam.pitch = -25.0f; double last = glfwGetTime(); uint32_t fid = 1;
-    bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false, pLast = false;
-    bool enableParticles = true;
+    bool drawDbg = false, fLast = false, k4Last = false, k1L=false, k2L=false, k3L=false, pLast = false, tLast = false, mLast = false;
+    bool enableParticles = true, enableTAA = true, enableMarching = true;
     CullingMode mode = CULLING_OCTREE;
-    std::cout << "Controls: [1-3] Culling Mode, [4] Toggle Octree Grid, [F] Drop Light, [P] Toggle Particles\n";
+    std::cout << "Controls: [1-3] Culling Mode, [4] Toggle Octree Grid, [F] Drop Light, [P] Toggle Particles, [T] Toggle TAA, [M] Toggle Marching Cubes\n";
 
     while (!glfwWindowShouldClose(window)) {
-        in.update(); if (in.wasResized()) { eng.recreateSwapchain(); rs.onResize(eng); in.clearResized(); }
+        in.update(); if (in.wasResized()) { eng.recreateSwapchain(); in.clearResized(); }
+        if (eng.consumeSwapchainRecreated()) rs.onResize(eng);
         double now = glfwGetTime(); float dt = (float)(now - last); last = now; cam.update(in, dt);
         if (in.isKeyDown(GLFW_KEY_1) && !k1L) { mode = CULLING_NONE; std::cout << "Mode: No Culling\n"; } k1L=in.isKeyDown(GLFW_KEY_1);
         if (in.isKeyDown(GLFW_KEY_2) && !k2L) { mode = CULLING_BRUTE_FORCE; std::cout << "Mode: Brute Force Frustum Culling\n"; } k2L=in.isKeyDown(GLFW_KEY_2);
@@ -229,12 +230,16 @@ int main() {
         if (in.isKeyDown(GLFW_KEY_4) && !k4Last) { drawDbg = !drawDbg; std::cout << "Debug Grid: " << (drawDbg ? "ENABLED" : "DISABLED") << "\n"; } k4Last = in.isKeyDown(GLFW_KEY_4);
 
         if (in.isKeyDown(GLFW_KEY_P) && !pLast) { enableParticles = !enableParticles; std::cout << "Particles: " << (enableParticles ? "ENABLED" : "DISABLED") << "\n"; } pLast = in.isKeyDown(GLFW_KEY_P);
+        if (in.isKeyDown(GLFW_KEY_T) && !tLast) { enableTAA = !enableTAA; std::cout << "TAA: " << (enableTAA ? "ENABLED" : "DISABLED") << "\n"; } tLast = in.isKeyDown(GLFW_KEY_T);
+        if (in.isKeyDown(GLFW_KEY_M) && !mLast) { enableMarching = !enableMarching; std::cout << "Marching Cubes: " << (enableMarching ? "ENABLED" : "DISABLED") << "\n"; } mLast = in.isKeyDown(GLFW_KEY_M);
+        rs.setTAAEnabled(enableTAA); rs.setMarchingCubesEnabled(enableMarching);
 
-        if (in.isKeyDown(GLFW_KEY_F) && !fLast) { std::cout << "Dropped Flashlight\n"; FallingFlashlight fl{cam.position, cam.front()*12.f, glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f)*3.f}; fl.object.submeshes.push_back(cubeSM); fl.object.unlit = true; fl.object.unlitColor = glm::vec4(fl.color, 1.f); fl.object.localBounds = cubeBounds; fl.object.updateWorldBounds(); dynLights.push_back(fl); }
+        if (in.isKeyDown(GLFW_KEY_F) && !fLast) { std::cout << "Dropped Flashlight\n"; FallingFlashlight fl{cam.position, cam.front()*12.f, glm::vec3((rand()%100)/100.f, (rand()%100)/100.f, (rand()%100)/100.f)*3.f}; fl.object.submeshes.push_back(cubeSM); fl.object.unlit = true; fl.object.dynamic = true; fl.object.unlitColor = glm::vec4(fl.color, 1.f); fl.object.localBounds = cubeBounds; fl.object.transform = fl.object.prevTransform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f)); fl.object.updateWorldBounds(); dynLights.push_back(fl); }
         fLast = in.isKeyDown(GLFW_KEY_F);
 
         std::vector<const SceneObject*> dynPtrs;
         for (auto& fl : dynLights) {
+            fl.object.prevTransform = fl.object.transform;
             if (fl.position.y > FLOOR) {
                 fl.velocity.y += GRAV * dt; fl.position += fl.velocity * dt;
                 fl.object.transform = glm::translate(glm::mat4(1.0f), fl.position) * glm::scale(glm::mat4(1.0f), glm::vec3(0.15f));

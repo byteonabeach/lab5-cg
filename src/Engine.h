@@ -36,6 +36,7 @@ struct Vertex {
 struct InstanceData {
     glm::mat4 model;
     glm::vec4 color;
+    glm::mat4 prevModel;
 
     static VkVertexInputBindingDescription getBindingDesc() {
         VkVertexInputBindingDescription d{};
@@ -45,12 +46,12 @@ struct InstanceData {
         return d;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 5> getAttrDescs() {
-        std::array<VkVertexInputAttributeDescription, 5> a{};
-        a[0] = {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, model) + 0 * sizeof(glm::vec4))};
-        a[1] = {5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, model) + 1 * sizeof(glm::vec4))};
-        a[2] = {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, model) + 2 * sizeof(glm::vec4))};
-        a[3] = {7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, model) + 3 * sizeof(glm::vec4))};
+    static std::array<VkVertexInputAttributeDescription, 9> getAttrDescs() {
+        std::array<VkVertexInputAttributeDescription, 9> a{};
+        for (uint32_t i = 0; i < 4; ++i) {
+            a[i] = {4 + i, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, model) + i * sizeof(glm::vec4))};
+            a[5 + i] = {9 + i, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)(offsetof(InstanceData, prevModel) + i * sizeof(glm::vec4))};
+        }
         a[4] = {8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, (uint32_t)offsetof(InstanceData, color)};
         return a;
     }
@@ -73,6 +74,8 @@ struct SubMesh {
 struct SceneObject {
     std::vector<SubMesh> submeshes;
     glm::mat4 transform = glm::mat4(1.0f);
+    glm::mat4 prevTransform = glm::mat4(1.0f);
+    bool dynamic = false;
     AABB localBounds;
     AABB worldBounds;
     bool animatable = false;
@@ -84,6 +87,10 @@ struct SceneObject {
 
     void updateWorldBounds() {
         worldBounds = localBounds.transform(transform);
+    }
+
+    const glm::mat4& previousTransform() const {
+        return dynamic ? prevTransform : transform;
     }
 
     void nextAnimFrame() {
@@ -137,6 +144,7 @@ public:
     uint32_t getGraphicsFamily() const { return graphicsFamily; }
 
     VkExtent2D getSwapExtent() const { return swapExtent; }
+    bool consumeSwapchainRecreated() { bool r = swapchainRecreated; swapchainRecreated = false; return r; }
     VkFormat getSwapFormat() const { return swapFormat; }
     const std::vector<VkImageView>& getSwapImageViews() const { return swapImageViews; }
     size_t getSwapImageCount() const { return swapImages.size(); }
@@ -213,6 +221,10 @@ private:
     std::vector<VkFence> inFlightFences;
     std::vector<VkFence> imagesInFlight;
     int currentFrame = 0;
+    bool swapchainRecreated = false;
+
+    VkPhysicalDeviceMemoryProperties memProps{};
+    float maxAnisotropy = 1.0f;
 
     struct TextureRes {
         VkImage image = VK_NULL_HANDLE;
@@ -245,6 +257,7 @@ private:
     void createCommandPool_();
     void createCommandBuffers_();
     void createSyncObjects_();
+    void createRenderFinishedSemaphores_();
     void createMaterialLayout_();
     void createMaterialPool_();
     void cleanupSwapchain_();

@@ -1,0 +1,86 @@
+#version 450
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "mc_common.glsl"
+
+struct McVertex {
+    vec4 pos;
+    vec4 normal;
+    vec4 prevPos;
+};
+
+layout(set = 0, binding = 0) buffer VertexBuf {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+    McVertex vertices[];
+};
+
+layout(set = 0, binding = 1) readonly buffer FieldBuf {
+    float field[];
+};
+
+layout(set = 0, binding = 2) readonly buffer TriTable {
+    int triTable[];
+};
+
+const ivec3 CORNER[8] = ivec3[](
+    ivec3(0, 0, 0), ivec3(1, 0, 0), ivec3(1, 1, 0), ivec3(0, 1, 0),
+    ivec3(0, 0, 1), ivec3(1, 0, 1), ivec3(1, 1, 1), ivec3(0, 1, 1)
+);
+
+const ivec2 EDGE[12] = ivec2[](
+    ivec2(0, 1), ivec2(1, 2), ivec2(2, 3), ivec2(3, 0),
+    ivec2(4, 5), ivec2(5, 6), ivec2(6, 7), ivec2(7, 4),
+    ivec2(0, 4), ivec2(1, 5), ivec2(2, 6), ivec2(3, 7)
+);
+
+const int TRI_STRIDE = 16;
+
+McVertex makeVertex(ivec3 cell, float values[8], int e) {
+    int a = EDGE[e].x;
+    int b = EDGE[e].y;
+    float t = clamp((pc.iso - values[a]) / (values[b] - values[a]), 0.0, 1.0);
+    vec3 gridPos = vec3(cell) + mix(vec3(CORNER[a]), vec3(CORNER[b]), t);
+    vec3 local = (gridPos - 0.5 * float(pc.grid)) * pc.originCell.w;
+
+    vec3 grad = evalGradient(local, pc.time);
+    float gradLen = max(length(grad), 1e-4);
+    vec3 normal = -grad / gradLen;
+
+    float delta = evalField(local, pc.prevTime) - evalField(local, pc.time);
+    vec3 prevLocal = local + normal * clamp(delta / gradLen, -2.0, 2.0);
+
+    McVertex v;
+    v.pos = vec4(local + pc.originCell.xyz, 1.0);
+    v.normal = vec4(normal, 0.0);
+    v.prevPos = vec4(prevLocal + pc.originCell.xyz, 1.0);
+    return v;
+}
+
+void main() {
+    ivec3 cell = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(cell, ivec3(pc.grid)))) return;
+
+    int n = pc.grid + 1;
+    float values[8];
+    int mask = 0;
+    for (int c = 0; c < 8; ++c) {
+        ivec3 p = cell + CORNER[c];
+        values[c] = field[(p.z * n + p.y) * n + p.x];
+        if (values[c] >= pc.iso) mask |= 1 << c;
+    }
+    if (mask == 0 || mask == 255) return;
+
+    int base = mask * TRI_STRIDE;
+    int triCount = 0;
+    while (triCount < TRI_STRIDE / 3 && triTable[base + triCount * 3] >= 0) ++triCount;
+
+    uint first = atomicAdd(vertexCount, uint(triCount * 3));
+    if (first + uint(triCount * 3) > pc.maxVertices) return;
+
+    for (int i = 0; i < triCount * 3; ++i) {
+        vertices[first + uint(i)] = makeVertex(cell, values, triTable[base + i]);
+    }
+}

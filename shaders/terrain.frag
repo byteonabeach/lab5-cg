@@ -6,10 +6,20 @@ layout(location = 2) in vec2 inUV;
 layout(location = 3) in vec3 inTangent;
 layout(location = 4) in vec4 inColor;
 
+layout(set = 0, binding = 0) uniform GeomUBO {
+    mat4 view;
+    mat4 proj;
+    vec4 cameraPos;
+    mat4 viewProj;
+    mat4 prevViewProj;
+    vec4 params;
+} ubo;
+
 layout(set = 1, binding = 0) uniform sampler2D heightMap;
 
 layout(location = 0) out vec4 gNormal;
 layout(location = 1) out vec4 gAlbedo;
+layout(location = 2) out vec2 gVelocity;
 
 void main() {
     vec3 N = normalize(inNormal);
@@ -34,6 +44,11 @@ void main() {
         diffuse = mix(diffuse, rockColor, rockFactor);
     }
 
+    vec4 cur = ubo.viewProj * vec4(inWorldPos, 1.0);
+    vec4 prev = ubo.prevViewProj * vec4(inWorldPos, 1.0);
+    vec2 velocity = prev.w < 1e-4 ? vec2(0.0) : (cur.xy / cur.w - prev.xy / prev.w) * 0.5;
+
     gNormal = vec4(N, 0.0);
     gAlbedo = vec4(diffuse, 1.0);
+    gVelocity = velocity;
 }

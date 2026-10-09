@@ -61,54 +61,58 @@ void main() {
 
     vec3 result = albedo.rgb * ubo.ambientColor.rgb;
 
+    vec3 V = normalize(ubo.viewPos.xyz - worldPos);
+    float viewDepth = abs((ubo.view * vec4(worldPos, 1.0)).z);
+    vec2 shadowTexel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+
     for (int i = 0; i < ubo.countPad.x; ++i) {
-        LightData light = ubo.lights[i];
-        int type = int(light.params.x);
+        int type = int(ubo.lights[i].params.x);
+        vec4 lightColor = ubo.lights[i].color;
 
         vec3 L;
         float atten = 1.0;
 
         if (type == 0) {
-            L = normalize(-light.direction.xyz);
+            L = normalize(-ubo.lights[i].direction.xyz);
         } else if (type == 1) {
-            vec3 toLight = light.position.xyz - worldPos;
+            vec3 toLight = ubo.lights[i].position.xyz - worldPos;
             float dist = length(toLight);
-            float range = max(light.params.w, 0.001);
+            float range = max(ubo.lights[i].params.w, 0.001);
             L = toLight / dist;
             atten = clamp(1.0 - (dist * dist) / (range * range), 0.0, 1.0);
-        } else if (type == 2) {
-            L = normalize(light.position.xyz - worldPos);
+            if (atten <= 0.0) continue;
+        } else {
+            L = normalize(ubo.lights[i].position.xyz - worldPos);
         }
 
-        float diff = max(dot(normal, L), 0.0);
+        float NdotL = dot(normal, L);
+        float diff = max(NdotL, 0.0);
 
         float shadow = 1.0;
-        if (light.params2.x > 0.5) {
-            vec4 viewSpacePos = ubo.view * vec4(worldPos, 1.0);
-            float depthValue = abs(viewSpacePos.z);
+        if (ubo.lights[i].params2.x > 0.5) {
+            vec4 splits = ubo.lights[i].cascadeSplits;
 
             int cascadeIndex = -1;
-            if (depthValue < light.cascadeSplits.x) cascadeIndex = 0;
-            else if (depthValue < light.cascadeSplits.y) cascadeIndex = 1;
-            else if (depthValue < light.cascadeSplits.z) cascadeIndex = 2;
-            else if (depthValue < light.cascadeSplits.w) cascadeIndex = 3;
+            if (viewDepth < splits.x) cascadeIndex = 0;
+            else if (viewDepth < splits.y) cascadeIndex = 1;
+            else if (viewDepth < splits.z) cascadeIndex = 2;
+            else if (viewDepth < splits.w) cascadeIndex = 3;
 
             if (cascadeIndex >= 0) {
-                vec4 lightSpacePos = light.cascadeMatrices[cascadeIndex] * vec4(worldPos, 1.0);
+                vec4 lightSpacePos = ubo.lights[i].cascadeMatrices[cascadeIndex] * vec4(worldPos, 1.0);
                 vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
                 projCoords.xy = projCoords.xy * 0.5 + 0.5;
 
                 if (projCoords.z > 0.0 && projCoords.z < 1.0 &&
                     projCoords.x > 0.0 && projCoords.x < 1.0 &&
                     projCoords.y > 0.0 && projCoords.y < 1.0) {
-                    float bias = max(0.0015 * (1.0 - dot(normal, L)), 0.0002);
+                    float bias = max(0.0015 * (1.0 - NdotL), 0.0002);
                     bias *= (1.0 + float(cascadeIndex) * 0.5);
 
-                    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
                     shadow = 0.0;
                     for (int x = -1; x <= 1; ++x) {
                         for (int y = -1; y <= 1; ++y) {
-                            float pcfDepth = texture(shadowMap, vec3(projCoords.xy + vec2(x, y) * texelSize, float(cascadeIndex))).r;
+                            float pcfDepth = texture(shadowMap, vec3(projCoords.xy + vec2(x, y) * shadowTexel, float(cascadeIndex))).r;
                             shadow += (projCoords.z - bias > pcfDepth) ? 0.0 : 1.0;
                         }
                     }
@@ -117,13 +121,12 @@ void main() {
             }
         }
 
-        vec3 V = normalize(ubo.viewPos.xyz - worldPos);
         vec3 H = normalize(L + V);
         float spec = pow(max(dot(normal, H), 0.0), 32.0);
-        vec3 specular = spec * light.color.rgb * 0.25;
+        vec3 specular = spec * lightColor.rgb * 0.25;
 
-        vec3 diffuse = diff * albedo.rgb * light.color.rgb;
-        result += (diffuse + specular) * atten * shadow * light.color.a;
+        vec3 diffuse = diff * albedo.rgb * lightColor.rgb;
+        result += (diffuse + specular) * atten * shadow * lightColor.a;
     }
 
     outColor = vec4(toneMapACES(result), 1.0);

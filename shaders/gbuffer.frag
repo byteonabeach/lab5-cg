@@ -5,6 +5,16 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec3 inTangent;
 layout(location = 4) in vec4 inColor;
+layout(location = 5) in vec3 inPrevWorldPos;
+
+layout(set = 0, binding = 0) uniform GeomUBO {
+    mat4 view;
+    mat4 proj;
+    vec4 cameraPos;
+    mat4 viewProj;
+    mat4 prevViewProj;
+    vec4 params;
+} ubo;
 
 layout(set = 1, binding = 0) uniform sampler2D diffuseTex;
 layout(set = 1, binding = 1) uniform sampler2D normalTex;
@@ -15,10 +25,19 @@ layout(push_constant) uniform PushConstants {
     float time;
     int isCurtain;
     int isTransparent;
+    float prevTime;
 } pc;
 
 layout(location = 0) out vec4 gNormal;
 layout(location = 1) out vec4 gAlbedo;
+layout(location = 2) out vec2 gVelocity;
+
+vec2 motionVector() {
+    vec4 cur = ubo.viewProj * vec4(inWorldPos, 1.0);
+    vec4 prev = ubo.prevViewProj * vec4(inPrevWorldPos, 1.0);
+    if (prev.w < 1e-4) return vec2(0.0);
+    return (cur.xy / cur.w - prev.xy / prev.w) * 0.5;
+}
 
 void main() {
     if (pc.isTransparent != 0) {
@@ -37,6 +56,7 @@ void main() {
     if (pc.isUnlit != 0) {
         gNormal = vec4(0.0, 0.0, 0.0, 0.0);
         gAlbedo = inColor;
+        gVelocity = motionVector();
         return;
     }
 
@@ -54,4 +74,5 @@ void main() {
 
     gNormal = vec4(finalNormal, 0.0);
     gAlbedo = vec4(diffuse.rgb, 1.0);
+    gVelocity = motionVector();
 }

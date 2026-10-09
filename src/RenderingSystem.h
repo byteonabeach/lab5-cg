@@ -4,7 +4,9 @@
 #include "Light.h"
 #include "Camera.h"
 #include "Terrain.h"
+#include "MarchingCubes.h"
 #include <vector>
+#include <unordered_map>
 
 struct RenderBatch {
     MeshHandle mesh;
@@ -19,23 +21,58 @@ struct RenderBatch {
     std::vector<InstanceData> instances;
 };
 
+struct BatchKey {
+    int mesh;
+    VkDescriptorSet matSet;
+    bool isUnlit;
+    bool isCurtain;
+    bool isTransparent;
+    glm::vec4 unlitColor;
+
+    bool operator==(const BatchKey& o) const {
+        return mesh == o.mesh && matSet == o.matSet && isUnlit == o.isUnlit && isCurtain == o.isCurtain && isTransparent == o.isTransparent && unlitColor == o.unlitColor;
+    }
+};
+
+struct BatchKeyHash {
+    size_t operator()(const BatchKey& k) const {
+        size_t h = std::hash<int>()(k.mesh);
+        auto mix = [&h](size_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+        mix(std::hash<uint64_t>()((uint64_t)k.matSet));
+        mix((size_t)k.isUnlit | ((size_t)k.isCurtain << 1) | ((size_t)k.isTransparent << 2));
+        mix(std::hash<float>()(k.unlitColor.x));
+        mix(std::hash<float>()(k.unlitColor.y));
+        mix(std::hash<float>()(k.unlitColor.z));
+        mix(std::hash<float>()(k.unlitColor.w));
+        return h;
+    }
+};
+
 class RenderingSystem {
 public:
     void init(Engine& engine);
     void cleanup(Engine& engine);
     void onResize(Engine& engine);
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
+    void setTAAEnabled(bool enabled) { taaEnabled = enabled; }
+    void setMarchingCubesEnabled(bool enabled) { marchingEnabled = enabled; }
     void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {}, bool enableParticles = true, const Terrain* terrain = nullptr);
 
 private:
     GBuffer gbuffer;
-    struct GeomUBO { glm::mat4 view, proj; glm::vec4 cameraPos; };
+    struct GeomUBO {
+        glm::mat4 view, proj;
+        glm::vec4 cameraPos;
+        glm::mat4 viewProj, prevViewProj;
+        glm::vec4 params;
+    };
     static constexpr int MAX_INSTANCES = 40000;
     std::vector<VkBuffer> instanceBufs;
     std::vector<VkDeviceMemory> instanceMems;
     std::vector<void*> instanceMapped;
     void createInstanceBuffers_(Engine& engine);
     std::vector<RenderBatch> activeBatches;
+    std::unordered_map<BatchKey, size_t, BatchKeyHash> batchLookup;
 
     VkDescriptorSetLayout geomUBOLayout = VK_NULL_HANDLE;
     VkPipelineLayout geomPipelineLayout = VK_NULL_HANDLE;
@@ -47,8 +84,9 @@ private:
     std::vector<VkDeviceMemory> geomUBOMems;
     std::vector<void*> geomUBOMapped;
 
+    static constexpr VkFormat SCENE_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
     VkRenderPass lightRenderPass = VK_NULL_HANDLE;
-    std::vector<VkFramebuffer> lightFramebuffers;
+    VkFramebuffer lightFramebuffer = VK_NULL_HANDLE;
     VkDescriptorSetLayout lightDescLayout = VK_NULL_HANDLE;
     VkPipelineLayout lightPipelineLayout = VK_NULL_HANDLE;
     VkPipeline lightPipeline = VK_NULL_HANDLE;
@@ -57,6 +95,29 @@ private:
     std::vector<VkBuffer> lightUBOBufs;
     std::vector<VkDeviceMemory> lightUBOMems;
     std::vector<void*> lightUBOMapped;
+
+    VkImage sceneImage = VK_NULL_HANDLE;
+    VkDeviceMemory sceneMemory = VK_NULL_HANDLE;
+    VkImageView sceneView = VK_NULL_HANDLE;
+    VkImage historyImages[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory historyMemories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkImageView historyViews[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkSampler taaLinearSampler = VK_NULL_HANDLE;
+    VkRenderPass taaRenderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> taaFramebuffers;
+    VkDescriptorSetLayout taaDescLayout = VK_NULL_HANDLE;
+    VkPipelineLayout taaPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline taaPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool taaDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet taaDescSets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool taaEnabled = true;
+    bool taaReset = true;
+    uint32_t taaFrame = 0;
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    bool hasPrevViewProj = false;
+
+    MarchingCubes marching;
+    bool marchingEnabled = true;
 
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
@@ -114,6 +175,12 @@ private:
     void createDescriptors_(Engine& engine);
     void updateLightDescSets_(Engine& engine);
     void cleanupFramebuffers_(VkDevice device);
+
+    void createTAAImages_(Engine& engine);
+    void destroyTAAImages_(VkDevice device);
+    void createTAAPass_(Engine& engine);
+    void createTAAPipeline_(Engine& engine);
+    void updateTAADescSets_(Engine& engine);
 
     void createParticleResources_(Engine& engine);
     void createParticlePipelines_(Engine& engine);

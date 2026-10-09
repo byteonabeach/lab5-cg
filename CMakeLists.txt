@@ -32,6 +32,7 @@ add_executable(VulkanDeferred
     src/RenderingSystem.cpp
     src/Octree.cpp
     src/Terrain.cpp
+    src/MarchingCubes.cpp
 )
 
 target_include_directories(VulkanDeferred PRIVATE
@@ -80,13 +81,19 @@ set(SHADERS
     particles.frag
     terrain.vert
     terrain.frag
+    mc_field.comp
+    mc_polygonize.comp
+    marching.vert
+    marching.frag
+    marching_shadow.vert
+    taa.frag
 )
 
 foreach(SHADER ${SHADERS})
   add_custom_command(
         OUTPUT  ${SHADER_OUT}/${SHADER}.spv
         COMMAND ${GLSLC} ${SHADER_DIR}/${SHADER} -o ${SHADER_OUT}/${SHADER}.spv
-        DEPENDS ${SHADER_DIR}/${SHADER}
+        DEPENDS ${SHADER_DIR}/${SHADER} ${SHADER_DIR}/mc_common.glsl
         COMMENT "Compiling ${SHADER}"
     )
   list(APPEND SPIRV_FILES ${SHADER_OUT}/${SHADER}.spv)

@@ -7,9 +7,10 @@ class Engine;
 
 class GBuffer {
 public:
-    static constexpr int NUM_ATTACHMENTS = 2;
+    static constexpr int NUM_ATTACHMENTS = 3;
     static constexpr VkFormat FORMAT_NORMAL = VK_FORMAT_R16G16B16A16_SFLOAT;
     static constexpr VkFormat FORMAT_ALBEDO = VK_FORMAT_R8G8B8A8_UNORM;
+    static constexpr VkFormat FORMAT_VELOCITY = VK_FORMAT_R16G16_SFLOAT;
 
     void init(Engine& engine, uint32_t width, uint32_t height);
     void cleanup(VkDevice device);
@@ -20,6 +21,7 @@ public:
 
     VkImageView getNormalView() const { return views[0]; }
     VkImageView getAlbedoView() const { return views[1]; }
+    VkImageView getVelocityView() const { return views[2]; }
     VkImageView getDepthView()  const { return depthView; }
 
     VkSampler getSampler() const { return sampler; }

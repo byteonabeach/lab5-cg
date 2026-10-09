@@ -3,7 +3,7 @@
 #include <vector>
 #include <memory>
 
-class SceneObject;
+struct SceneObject;
 
 class OctreeNode {
 public:

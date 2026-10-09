@@ -5,11 +5,15 @@ layout(triangle_strip, max_vertices = 4) out;
 layout(location = 0) in vec4 inColor[];
 layout(location = 1) in float inLife[];
 layout(location = 2) in float inMaxLife[];
+layout(location = 3) in vec3 inVel[];
 
 layout(set = 0, binding = 0) uniform GeomUBO {
     mat4 view;
     mat4 proj;
     vec4 cameraPos;
+    mat4 viewProj;
+    mat4 prevViewProj;
+    vec4 params;
 } ubo;
 
 layout(location = 0) out vec3 outWorldPos;
@@ -17,6 +21,7 @@ layout(location = 1) out vec3 outNormal;
 layout(location = 2) out vec2 outTexCoord;
 layout(location = 3) out vec3 outTangent;
 layout(location = 4) out vec4 outColor;
+layout(location = 5) out vec3 outPrevWorldPos;
 
 void main() {
     vec3 pos = gl_in[0].gl_Position.xyz;
@@ -26,6 +31,7 @@ void main() {
     vec4 color = inColor[0];
     float life = inLife[0];
     float maxLife = inMaxLife[0];
+    vec3 prevPos = pos - inVel[0] * ubo.params.x;
 
     float size = 0.15 * (life / maxLife);
 
@@ -39,9 +45,11 @@ void main() {
     vec2 offsets[4] = vec2[](vec2(-0.5,-0.5), vec2(0.5,-0.5), vec2(-0.5,0.5), vec2(0.5,0.5));
 
     for (int i = 0; i < 4; ++i) {
-        vec3 worldPos = pos + right * (offsets[i].x * size) + up * (offsets[i].y * size);
+        vec3 offset = right * (offsets[i].x * size) + up * (offsets[i].y * size);
+        vec3 worldPos = pos + offset;
         gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
         outWorldPos = worldPos;
+        outPrevWorldPos = prevPos + offset;
         outNormal = normal;
         outTexCoord = uvs[i];
         outTangent = tangent;
