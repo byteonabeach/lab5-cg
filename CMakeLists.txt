@@ -87,6 +87,7 @@ set(SHADERS
     marching.frag
     marching_shadow.vert
     taa.frag
+    distortion.frag
 )
 
 foreach(SHADER ${SHADERS})

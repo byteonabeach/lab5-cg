@@ -12,6 +12,7 @@ layout(push_constant) uniform PushConstants {
     float feedbackMax;
     int enabled;
     int reset;
+    int showMotion;
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -59,13 +60,49 @@ vec3 sampleHistory(vec2 uv, vec2 texSize) {
     return max(result / (wTop + wLeft + wCenter + wRight + wBottom), vec3(0.0));
 }
 
+vec3 directionColor(vec2 v) {
+    float h = atan(v.y, v.x) / 6.2831853 + 0.5;
+    return clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+}
+
+float segmentDistance(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+vec3 drawMotionVectors(vec3 color, ivec2 px, ivec2 res) {
+    vec2 velocity = texelFetch(velocityTex, px, 0).rg * vec2(res);
+    float speed = length(velocity);
+    if (speed > 1e-3) color = mix(color, directionColor(velocity), clamp(speed * 0.25, 0.2, 0.6));
+
+    const float cell = 32.0;
+    vec2 p = vec2(px) + 0.5;
+    vec2 center = (floor(p / cell) + 0.5) * cell;
+    vec2 v = texelFetch(velocityTex, clamp(ivec2(center), ivec2(0), res - 1), 0).rg * vec2(res);
+    float len = length(v);
+    if (len < 1e-3) return color;
+
+    vec2 dir = v / len;
+    vec2 side = vec2(-dir.y, dir.x);
+    float halfLen = clamp(len * 6.0, 4.0, cell * 0.42);
+    vec2 tip = center + dir * halfLen;
+    float d = segmentDistance(p, center - dir * halfLen, tip);
+    d = min(d, segmentDistance(p, tip, tip - dir * 5.0 + side * 3.5));
+    d = min(d, segmentDistance(p, tip, tip - dir * 5.0 - side * 3.5));
+
+    color = mix(color, vec3(0.0), 1.0 - smoothstep(1.2, 2.2, d));
+    return mix(color, vec3(1.0), 1.0 - smoothstep(0.4, 1.1, d));
+}
+
 void main() {
     ivec2 res = textureSize(sceneColor, 0);
     ivec2 px = ivec2(gl_FragCoord.xy);
     vec3 current = texelFetch(sceneColor, px, 0).rgb;
 
     if (pc.enabled == 0 || pc.reset != 0) {
-        outColor = vec4(current, 1.0);
+        outColor = vec4(pc.showMotion != 0 ? drawMotionVectors(current, px, res) : current, 1.0);
         outHistory = vec4(current, 1.0);
         return;
     }
@@ -117,6 +154,6 @@ void main() {
     if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0)))) feedback = 0.0;
 
     vec3 resolved = max(fromYCoCg(mix(toYCoCg(current), history, feedback)), vec3(0.0));
-    outColor = vec4(resolved, 1.0);
+    outColor = vec4(pc.showMotion != 0 ? drawMotionVectors(resolved, px, res) : resolved, 1.0);
     outHistory = vec4(resolved, 1.0);
 }

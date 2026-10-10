@@ -19,6 +19,15 @@ struct TAAPush {
     float feedbackMax;
     int enabled;
     int reset;
+    int showMotion;
+};
+
+struct DistortionPush {
+    float time;
+    float prevTime;
+    float strength;
+    float prevStrength;
+    int writeVelocity;
 };
 
 static float halton(uint32_t index, uint32_t base) {
@@ -55,10 +64,14 @@ void RenderingSystem::init(Engine& engine) {
     createTAAImages_(engine);
     createTAAPass_(engine);
     createTAAPipeline_(engine);
+    createDistortionImages_(engine);
+    createDistortionPass_(engine);
+    createDistortionPipeline_(engine);
     createFramebuffers_(engine);
     createDescriptors_(engine);
     updateLightDescSets_(engine);
     updateTAADescSets_(engine);
+    updateDistortionDescSet_(engine);
 
     createParticleResources_(engine);
     createParticlePipelines_(engine);
@@ -80,6 +93,12 @@ void RenderingSystem::cleanup(Engine& engine) {
     vkDestroyDescriptorPool(dev, taaDescPool, nullptr);
     vkDestroyRenderPass(dev, taaRenderPass, nullptr);
     vkDestroySampler(dev, taaLinearSampler, nullptr);
+    destroyDistortionImages_(dev);
+    vkDestroyPipeline(dev, distortionPipeline, nullptr);
+    vkDestroyPipelineLayout(dev, distortionPipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(dev, distortionDescLayout, nullptr);
+    vkDestroyDescriptorPool(dev, distortionDescPool, nullptr);
+    vkDestroyRenderPass(dev, distortionRenderPass, nullptr);
     vkDestroyRenderPass(dev, lightRenderPass, nullptr);
     vkDestroyPipeline(dev, lightPipeline, nullptr);
     vkDestroyPipelineLayout(dev, lightPipelineLayout, nullptr);
@@ -133,8 +152,8 @@ void RenderingSystem::cleanup(Engine& engine) {
 
 void RenderingSystem::onResize(Engine& engine) {
     VkDevice dev = engine.getDevice(); auto ext = engine.getSwapExtent();
-    cleanupFramebuffers_(dev); destroyTAAImages_(dev); gbuffer.recreate(engine, ext.width, ext.height);
-    createTAAImages_(engine); createFramebuffers_(engine); updateLightDescSets_(engine); updateTAADescSets_(engine);
+    cleanupFramebuffers_(dev); destroyTAAImages_(dev); destroyDistortionImages_(dev); gbuffer.recreate(engine, ext.width, ext.height);
+    createTAAImages_(engine); createDistortionImages_(engine); createFramebuffers_(engine); updateLightDescSets_(engine); updateTAADescSets_(engine); updateDistortionDescSet_(engine);
     taaReset = true; hasPrevViewProj = false;
 }
 
@@ -486,6 +505,18 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
 
+    const float distortionStrength = distortionEnabled ? 8.0f : 0.0f;
+    VkRenderPassBeginInfo drpi{}; drpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    drpi.renderPass = distortionRenderPass; drpi.framebuffer = distortionFramebuffer;
+    drpi.renderArea = {{0,0}, ext};
+    vkCmdBeginRenderPass(cmd, &drpi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, distortionPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, distortionPipelineLayout, 0, 1, &distortionDescSet, 0, nullptr);
+    DistortionPush dpc{time, distortionPrevTime, distortionStrength, distortionPrevStrength, distortionVelocity ? 1 : 0};
+    vkCmdPushConstants(cmd, distortionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(DistortionPush), &dpc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
     const uint32_t historyIn = taaFrame & 1;
     VkRenderPassBeginInfo trpi{}; trpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     trpi.renderPass = taaRenderPass; trpi.framebuffer = taaFramebuffers[historyIn * engine.getSwapImageCount() + imageIndex];
@@ -493,7 +524,7 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     vkCmdBeginRenderPass(cmd, &trpi, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, taaPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, taaPipelineLayout, 0, 1, &taaDescSets[historyIn], 0, nullptr);
-    TAAPush tpc{0.80f, 0.95f, taaEnabled ? 1 : 0, taaReset ? 1 : 0};
+    TAAPush tpc{0.80f, 0.95f, taaEnabled ? 1 : 0, taaReset ? 1 : 0, showMotionVectors ? 1 : 0};
     vkCmdPushConstants(cmd, taaPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TAAPush), &tpc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
@@ -502,6 +533,8 @@ void RenderingSystem::recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int 
     taaReset = false;
     prevViewProj = viewProj;
     hasPrevViewProj = true;
+    distortionPrevTime = time;
+    distortionPrevStrength = distortionStrength;
 
     if (enableParticles) {
         particleFrameIndex++;
@@ -822,6 +855,10 @@ void RenderingSystem::createFramebuffers_(Engine& engine) {
     VkFramebufferCreateInfo lfci{}; lfci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; lfci.renderPass = lightRenderPass; lfci.attachmentCount = 1; lfci.pAttachments = &sceneView; lfci.width = ext.width; lfci.height = ext.height; lfci.layers = 1;
     vkCreateFramebuffer(engine.getDevice(), &lfci, nullptr, &lightFramebuffer);
 
+    VkImageView datts[2] = {distortedSceneView, distortedVelocityView};
+    VkFramebufferCreateInfo dfci{}; dfci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; dfci.renderPass = distortionRenderPass; dfci.attachmentCount = 2; dfci.pAttachments = datts; dfci.width = ext.width; dfci.height = ext.height; dfci.layers = 1;
+    vkCreateFramebuffer(engine.getDevice(), &dfci, nullptr, &distortionFramebuffer);
+
     taaFramebuffers.resize(2 * views.size());
     for (uint32_t parity = 0; parity < 2; ++parity) {
         for (size_t i = 0; i < views.size(); ++i) {
@@ -835,6 +872,8 @@ void RenderingSystem::createFramebuffers_(Engine& engine) {
 void RenderingSystem::cleanupFramebuffers_(VkDevice device) {
     vkDestroyFramebuffer(device, lightFramebuffer, nullptr);
     lightFramebuffer = VK_NULL_HANDLE;
+    vkDestroyFramebuffer(device, distortionFramebuffer, nullptr);
+    distortionFramebuffer = VK_NULL_HANDLE;
     for (auto fb : taaFramebuffers) vkDestroyFramebuffer(device, fb, nullptr);
     taaFramebuffers.clear();
 }
@@ -945,9 +984,9 @@ void RenderingSystem::createTAAPipeline_(Engine& engine) {
 void RenderingSystem::updateTAADescSets_(Engine& engine) {
     for (uint32_t p = 0; p < 2; ++p) {
         VkDescriptorImageInfo ii[4] = {
-            {gbuffer.getSampler(), sceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {gbuffer.getSampler(), distortedSceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
             {taaLinearSampler, historyViews[p], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {gbuffer.getSampler(), gbuffer.getVelocityView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {gbuffer.getSampler(), distortedVelocityView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
             {gbuffer.getSampler(), gbuffer.getDepthView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
         };
         std::array<VkWriteDescriptorSet, 4> w{};
@@ -956,6 +995,103 @@ void RenderingSystem::updateTAADescSets_(Engine& engine) {
         }
         vkUpdateDescriptorSets(engine.getDevice(), (uint32_t)w.size(), w.data(), 0, nullptr);
     }
+}
+
+void RenderingSystem::createDistortionImages_(Engine& engine) {
+    auto ext = engine.getSwapExtent();
+    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    engine.createImage(ext.width, ext.height, 1, SCENE_FORMAT, VK_IMAGE_TILING_OPTIMAL, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, distortedSceneImage, distortedSceneMemory);
+    distortedSceneView = engine.createImageView(distortedSceneImage, SCENE_FORMAT, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+
+    engine.createImage(ext.width, ext.height, 1, GBuffer::FORMAT_VELOCITY, VK_IMAGE_TILING_OPTIMAL, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, distortedVelocityImage, distortedVelocityMemory);
+    distortedVelocityView = engine.createImageView(distortedVelocityImage, GBuffer::FORMAT_VELOCITY, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_VIEW_TYPE_2D);
+}
+
+void RenderingSystem::destroyDistortionImages_(VkDevice device) {
+    vkDestroyImageView(device, distortedSceneView, nullptr);
+    vkDestroyImage(device, distortedSceneImage, nullptr);
+    vkFreeMemory(device, distortedSceneMemory, nullptr);
+    distortedSceneView = VK_NULL_HANDLE; distortedSceneImage = VK_NULL_HANDLE; distortedSceneMemory = VK_NULL_HANDLE;
+    vkDestroyImageView(device, distortedVelocityView, nullptr);
+    vkDestroyImage(device, distortedVelocityImage, nullptr);
+    vkFreeMemory(device, distortedVelocityMemory, nullptr);
+    distortedVelocityView = VK_NULL_HANDLE; distortedVelocityImage = VK_NULL_HANDLE; distortedVelocityMemory = VK_NULL_HANDLE;
+}
+
+void RenderingSystem::createDistortionPass_(Engine& engine) {
+    VkAttachmentDescription atts[2]{};
+    atts[0].format = SCENE_FORMAT; atts[0].samples = VK_SAMPLE_COUNT_1_BIT; atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    atts[1] = atts[0];
+    atts[1].format = GBuffer::FORMAT_VELOCITY;
+
+    VkAttachmentReference refs[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+    VkSubpassDescription sub{}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sub.colorAttachmentCount = 2; sub.pColorAttachments = refs;
+    VkSubpassDependency deps[2] = {
+        {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0},
+        {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, 0}
+    };
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 2; rpci.pAttachments = atts; rpci.subpassCount = 1; rpci.pSubpasses = &sub; rpci.dependencyCount = 2; rpci.pDependencies = deps;
+    vkCreateRenderPass(engine.getDevice(), &rpci, nullptr, &distortionRenderPass);
+}
+
+void RenderingSystem::createDistortionPipeline_(Engine& engine) {
+    VkDevice dev = engine.getDevice();
+
+    std::array<VkDescriptorSetLayoutBinding, 2> b{};
+    for (uint32_t i = 0; i < 2; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lci.bindingCount = (uint32_t)b.size(); lci.pBindings = b.data();
+    vkCreateDescriptorSetLayout(dev, &lci, nullptr, &distortionDescLayout);
+
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = 1; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+    vkCreateDescriptorPool(dev, &pci, nullptr, &distortionDescPool);
+
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = distortionDescPool; ai.descriptorSetCount = 1; ai.pSetLayouts = &distortionDescLayout;
+    vkAllocateDescriptorSets(dev, &ai, &distortionDescSet);
+
+    VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(DistortionPush)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &distortionDescLayout; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+    vkCreatePipelineLayout(dev, &plci, nullptr, &distortionPipelineLayout);
+
+    auto vs = loadShader_(engine, "shaders/lighting.vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+    auto fs = loadShader_(engine, "shaders/distortion.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkPipelineShaderStageCreateInfo stages[] = {vs, fs};
+
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba[2]{}; cba[0].colorWriteMask = 0xF; cba[1].colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO}; cb.attachmentCount = 2; cb.pAttachments = cba;
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO}; dy.dynamicStateCount = 2; dy.pDynamicStates = dyn;
+
+    VkGraphicsPipelineCreateInfo gci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gci.stageCount = 2; gci.pStages = stages; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia; gci.pViewportState = &vp; gci.pRasterizationState = &rs; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb; gci.pDynamicState = &dy; gci.layout = distortionPipelineLayout; gci.renderPass = distortionRenderPass;
+    vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, nullptr, &distortionPipeline);
+    vkDestroyShaderModule(dev, vs.module, nullptr);
+    vkDestroyShaderModule(dev, fs.module, nullptr);
+}
+
+void RenderingSystem::updateDistortionDescSet_(Engine& engine) {
+    VkDescriptorImageInfo ii[2] = {
+        {taaLinearSampler, sceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {gbuffer.getSampler(), gbuffer.getVelocityView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+    };
+    std::array<VkWriteDescriptorSet, 2> w{};
+    for (uint32_t i = 0; i < 2; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = distortionDescSet; w[i].dstBinding = i; w[i].descriptorCount = 1; w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(engine.getDevice(), (uint32_t)w.size(), w.data(), 0, nullptr);
 }
 
 void RenderingSystem::createDescriptors_(Engine& engine) {

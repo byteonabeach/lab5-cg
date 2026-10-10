@@ -56,6 +56,9 @@ public:
     void setLights(const std::vector<LightData>& lights) { pendingLights = lights; }
     void setTAAEnabled(bool enabled) { taaEnabled = enabled; }
     void setMarchingCubesEnabled(bool enabled) { marchingEnabled = enabled; }
+    void setDistortionEnabled(bool enabled) { distortionEnabled = enabled; }
+    void setDistortionVelocityEnabled(bool enabled) { distortionVelocity = enabled; }
+    void setMotionVectorsVisible(bool visible) { showMotionVectors = visible; }
     void recordFrame(VkCommandBuffer cmd, uint32_t imageIndex, int frameIndex, const Camera& camera, const std::vector<const SceneObject*>& objects, Engine& engine, float time, MeshHandle debugCubeMesh = {}, const std::vector<AABB>& staticNodes = {}, const std::vector<AABB>& dynamicNodes = {}, bool enableParticles = true, const Terrain* terrain = nullptr);
 
 private:
@@ -115,6 +118,25 @@ private:
     uint32_t taaFrame = 0;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool hasPrevViewProj = false;
+    bool showMotionVectors = false;
+
+    VkImage distortedSceneImage = VK_NULL_HANDLE;
+    VkDeviceMemory distortedSceneMemory = VK_NULL_HANDLE;
+    VkImageView distortedSceneView = VK_NULL_HANDLE;
+    VkImage distortedVelocityImage = VK_NULL_HANDLE;
+    VkDeviceMemory distortedVelocityMemory = VK_NULL_HANDLE;
+    VkImageView distortedVelocityView = VK_NULL_HANDLE;
+    VkRenderPass distortionRenderPass = VK_NULL_HANDLE;
+    VkFramebuffer distortionFramebuffer = VK_NULL_HANDLE;
+    VkDescriptorSetLayout distortionDescLayout = VK_NULL_HANDLE;
+    VkPipelineLayout distortionPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline distortionPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool distortionDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet distortionDescSet = VK_NULL_HANDLE;
+    bool distortionEnabled = false;
+    bool distortionVelocity = true;
+    float distortionPrevTime = 0.0f;
+    float distortionPrevStrength = 0.0f;
 
     MarchingCubes marching;
     bool marchingEnabled = true;
@@ -181,6 +203,12 @@ private:
     void createTAAPass_(Engine& engine);
     void createTAAPipeline_(Engine& engine);
     void updateTAADescSets_(Engine& engine);
+
+    void createDistortionImages_(Engine& engine);
+    void destroyDistortionImages_(VkDevice device);
+    void createDistortionPass_(Engine& engine);
+    void createDistortionPipeline_(Engine& engine);
+    void updateDistortionDescSet_(Engine& engine);
 
     void createParticleResources_(Engine& engine);
     void createParticlePipelines_(Engine& engine);
